@@ -17,7 +17,6 @@ import { DEFAULT_MASK_AVATAR, Mask, useMaskStore } from "../store/mask";
 import {
   ChatMessage,
   createMessage,
-  ModelConfig,
   ModelType,
   useAppConfig,
   useChatStore,
@@ -45,7 +44,6 @@ import {
   readFromFile,
 } from "../utils";
 import { Updater } from "../typing";
-import { ModelConfigList } from "./model-config";
 import { FileName, Path } from "../constant";
 import { BUILTIN_MASK_STORE } from "../masks";
 import {
@@ -76,23 +74,9 @@ export function MaskAvatar(props: { avatar: string; model?: ModelType }) {
 export function MaskConfig(props: {
   mask: Mask;
   updateMask: Updater<Mask>;
-  extraListItems?: JSX.Element;
-  readonly?: boolean;
   shouldSyncFromGlobal?: boolean;
 }) {
   const [showPicker, setShowPicker] = useState(false);
-
-  const updateConfig = (updater: (config: ModelConfig) => void) => {
-    if (props.readonly) return;
-
-    const config = { ...props.mask.modelConfig };
-    updater(config);
-    props.updateMask((mask) => {
-      mask.modelConfig = config;
-      // if user changed current session mask, it will disable auto sync
-      mask.syncGlobalConfig = false;
-    });
-  };
 
   const copyMaskLink = () => {
     const maskLink = `${location.protocol}//${location.host}/#${Path.NewChat}?mask=${props.mask.id}`;
@@ -244,14 +228,6 @@ export function MaskConfig(props: {
             ></input>
           </ListItem>
         ) : null}
-      </List>
-
-      <List>
-        <ModelConfigList
-          modelConfig={{ ...props.mask.modelConfig }}
-          updateConfig={updateConfig}
-        />
-        {props.extraListItems}
       </List>
     </>
   );
@@ -672,7 +648,6 @@ export function MaskPage() {
               updateMask={(updater) =>
                 maskStore.updateMask(editingMaskId!, updater)
               }
-              readonly={editingMask.builtin}
             />
           </Modal>
         </div>

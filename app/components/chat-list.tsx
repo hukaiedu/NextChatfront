@@ -24,7 +24,8 @@ export function ChatItem(props: {
   onClick?: () => void;
   onDelete?: () => void;
   title: string;
-  count: number;
+  /** 未加载过消息的会话不展示条数 */
+  count?: number;
   time: string;
   selected: boolean;
   id: string;
@@ -42,6 +43,8 @@ export function ChatItem(props: {
   }, [props.selected]);
 
   const { pathname: currentPath } = useLocation();
+  const countLabel =
+    props.count === undefined ? "" : Locale.ChatItem.ChatItemCount(props.count);
   return (
     <Draggable draggableId={`${props.id}`} index={props.index}>
       {(provided) => (
@@ -58,9 +61,7 @@ export function ChatItem(props: {
           }}
           {...provided.draggableProps}
           {...provided.dragHandleProps}
-          title={`${props.title}\n${Locale.ChatItem.ChatItemCount(
-            props.count,
-          )}`}
+          title={`${props.title}\n${countLabel}`}
         >
           {props.narrow ? (
             <div className={styles["chat-item-narrow"]}>
@@ -70,17 +71,17 @@ export function ChatItem(props: {
                   model={props.mask.modelConfig.model}
                 />
               </div>
-              <div className={styles["chat-item-narrow-count"]}>
-                {props.count}
-              </div>
+              {props.count !== undefined && (
+                <div className={styles["chat-item-narrow-count"]}>
+                  {props.count}
+                </div>
+              )}
             </div>
           ) : (
             <>
               <div className={styles["chat-item-title"]}>{props.title}</div>
               <div className={styles["chat-item-info"]}>
-                <div className={styles["chat-item-count"]}>
-                  {Locale.ChatItem.ChatItemCount(props.count)}
-                </div>
+                <div className={styles["chat-item-count"]}>{countLabel}</div>
                 <div className={styles["chat-item-date"]}>{props.time}</div>
               </div>
             </>
@@ -144,7 +145,7 @@ export function ChatList(props: { narrow?: boolean }) {
               <ChatItem
                 title={item.topic}
                 time={new Date(item.lastUpdate).toLocaleString()}
-                count={item.messages.length}
+                count={item.loaded ? item.messages.length : undefined}
                 key={item.id}
                 id={item.id}
                 index={i}

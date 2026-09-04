@@ -1,85 +1,21 @@
-import { ApiPath } from "@/app/constant";
-import { NextRequest } from "next/server";
-import { handle as openaiHandler } from "../../openai";
-import { handle as azureHandler } from "../../azure";
-import { handle as googleHandler } from "../../google";
-import { handle as anthropicHandler } from "../../anthropic";
-import { handle as baiduHandler } from "../../baidu";
-import { handle as bytedanceHandler } from "../../bytedance";
-import { handle as alibabaHandler } from "../../alibaba";
-import { handle as moonshotHandler } from "../../moonshot";
-import { handle as stabilityHandler } from "../../stability";
-import { handle as iflytekHandler } from "../../iflytek";
-import { handle as deepseekHandler } from "../../deepseek";
-import { handle as siliconflowHandler } from "../../siliconflow";
-import { handle as xaiHandler } from "../../xai";
-import { handle as chatglmHandler } from "../../glm";
-import { handle as proxyHandler } from "../../proxy";
-import { handle as ai302Handler } from "../../302ai";
+import { NextResponse } from "next/server";
 
-async function handle(
-  req: NextRequest,
-  { params }: { params: { provider: string; path: string[] } },
-) {
-  const apiPath = `/api/${params.provider}`;
-  console.log(`[${params.provider} Route] params `, params);
-  switch (apiPath) {
-    case ApiPath.Azure:
-      return azureHandler(req, { params });
-    case ApiPath.Google:
-      return googleHandler(req, { params });
-    case ApiPath.Anthropic:
-      return anthropicHandler(req, { params });
-    case ApiPath.Baidu:
-      return baiduHandler(req, { params });
-    case ApiPath.ByteDance:
-      return bytedanceHandler(req, { params });
-    case ApiPath.Alibaba:
-      return alibabaHandler(req, { params });
-    // case ApiPath.Tencent: using "/api/tencent"
-    case ApiPath.Moonshot:
-      return moonshotHandler(req, { params });
-    case ApiPath.Stability:
-      return stabilityHandler(req, { params });
-    case ApiPath.Iflytek:
-      return iflytekHandler(req, { params });
-    case ApiPath.DeepSeek:
-      return deepseekHandler(req, { params });
-    case ApiPath.XAI:
-      return xaiHandler(req, { params });
-    case ApiPath.ChatGLM:
-      return chatglmHandler(req, { params });
-    case ApiPath.SiliconFlow:
-      return siliconflowHandler(req, { params });
-    case ApiPath.OpenAI:
-      return openaiHandler(req, { params });
-    case ApiPath["302.AI"]:
-      return ai302Handler(req, { params });
-    default:
-      return proxyHandler(req, { params });
-  }
+/**
+ * personChat V1：唯一聊天通道为 /backend-api/* → Backend /api/* → Gemini Web。
+ * 旧 NextChat 多 Provider 代理（openai/anthropic/google/azure/baidu/bytedance/alibaba/moonshot/stability/iflytek/deepseek/xai/glm/siliconflow/302ai 及 default proxy）已下线。
+ * 所有 HTTP 方法统一返回 404，绝不进入原 Handler（ISSUE-01）。
+ */
+function disabledV1LegacyRoute() {
+  return NextResponse.json(
+    { error: true, message: "This legacy route is disabled in personChat V1" },
+    { status: 404 },
+  );
 }
 
-export const GET = handle;
-export const POST = handle;
-
-export const runtime = "edge";
-export const preferredRegion = [
-  "arn1",
-  "bom1",
-  "cdg1",
-  "cle1",
-  "cpt1",
-  "dub1",
-  "fra1",
-  "gru1",
-  "hnd1",
-  "iad1",
-  "icn1",
-  "kix1",
-  "lhr1",
-  "pdx1",
-  "sfo1",
-  "sin1",
-  "syd1",
-];
+export const GET = disabledV1LegacyRoute;
+export const POST = disabledV1LegacyRoute;
+export const PUT = disabledV1LegacyRoute;
+export const PATCH = disabledV1LegacyRoute;
+export const DELETE = disabledV1LegacyRoute;
+export const OPTIONS = disabledV1LegacyRoute;
+export const HEAD = disabledV1LegacyRoute;

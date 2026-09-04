@@ -1,45 +1,35 @@
-import {
-  getMessageTextContent,
-  isDalle3,
-  safeLocalStorage,
-  trimTopic,
-} from "../utils";
-
+import { safeLocalStorage, trimTopic } from "../utils";
 import { indexedDBStorage } from "@/app/utils/indexedDB-storage";
 import { nanoid } from "nanoid";
-import type {
-  ClientApi,
-  MultimodalContent,
-  RequestMessage,
-} from "../client/api";
-import { getClientApi } from "../client/api";
-import { ChatControllerPool } from "../client/controller";
+import { create } from "zustand";
 import { showToast } from "../components/ui-lib";
-import {
-  DEFAULT_INPUT_TEMPLATE,
-  DEFAULT_MODELS,
-  DEFAULT_SYSTEM_TEMPLATE,
-  GEMINI_SUMMARIZE_MODEL,
-  DEEPSEEK_SUMMARIZE_MODEL,
-  KnowledgeCutOffDate,
-  MCP_SYSTEM_TEMPLATE,
-  MCP_TOOLS_TEMPLATE,
-  ServiceProvider,
-  StoreKey,
-  SUMMARIZE_MODEL,
-} from "../constant";
-import Locale, { getLang } from "../locales";
-import { prettyObject } from "../utils/format";
-import { createPersistStore } from "../utils/store";
-import { estimateTokenLength } from "../utils/token";
-import { ModelConfig, ModelType, useAppConfig } from "./config";
-import { useAccessStore } from "./access";
-import { collectModelsWithDefaultModel } from "../utils/model";
+import { StoreKey } from "../constant";
+import Locale from "../locales";
+import type { MessageRole, RequestMessage } from "../client/api";
+import { ModelType } from "./config";
 import { createEmptyMask, Mask } from "./mask";
-import { executeMcpAction, getAllTools, isMcpEnabled } from "../mcp/actions";
-import { extractMcpJson, isMcpJson } from "../mcp/utils";
+import {
+  BackendApiError,
+  BackendMessage,
+  ConversationStatus,
+  RequestEventSubscription,
+  RequestStatusFrame,
+  cancelRequest as cancelBackendRequest,
+  createConversation,
+  deleteConversation,
+  isRequestFinished,
+  listConversations,
+  listMessages,
+  newIdempotencyKey,
+  patchConversation,
+  sendMessage,
+  subscribeRequestEvents,
+} from "../client/backend-api";
 
 const localStorage = safeLocalStorage();
+
+/** 后端只有 Gemini Web 一条通道,UI 不再选择模型 / Provider */
+export const BACKEND_MODEL_LABEL = "Gemini Web" as ModelType;
 
 export type ChatMessageTool = {
   id: string;
@@ -58,6 +48,8 @@ export type ChatMessage = RequestMessage & {
   date: string;
   streaming?: boolean;
   isError?: boolean;
+  /** 后端 Request 的错误码,失败气泡按它给提示 */
+  errorCode?: string;
   id: string;
   model?: ModelType;
   tools?: ChatMessageTool[];
@@ -82,17 +74,27 @@ export interface ChatStat {
 }
 
 export interface ChatSession {
+  /** 已落库的会话 = 后端 Conversation.id;本地草稿 = draft-<nanoid> */
   id: string;
   topic: string;
 
-  memoryPrompt: string;
   messages: ChatMessage[];
   stat: ChatStat;
   lastUpdate: number;
-  lastSummarizeIndex: number;
   clearContextIndex?: number;
 
   mask: Mask;
+
+  /** 尚未提交到后端的临时会话(第一次发送时才建 Conversation) */
+  draft?: boolean;
+  /** 消息是否已从后端加载过(未加载的会话点开时才拉) */
+  loaded?: boolean;
+  loadingMessages?: boolean;
+  conversationStatus?: ConversationStatus;
+  /** 该会话当前仍在执行中的 Request id */
+  pendingRequestId?: string;
+  /** 正在等待后端确认停止(CANCELLING 期间按钮 disabled) */
+  cancelling?: boolean;
 }
 
 export const DEFAULT_TOPIC = Locale.Store.DefaultTopic;
@@ -101,831 +103,766 @@ export const BOT_HELLO: ChatMessage = createMessage({
   content: Locale.Store.BotHello,
 });
 
-function createEmptySession(): ChatSession {
-  return {
-    id: nanoid(),
-    topic: DEFAULT_TOPIC,
-    memoryPrompt: "",
-    messages: [],
-    stat: {
-      tokenCount: 0,
-      wordCount: 0,
-      charCount: 0,
-    },
-    lastUpdate: Date.now(),
-    lastSummarizeIndex: 0,
+/** 后端错误码 → 中文提示;未列出的直接展示后端 message */
+const ERROR_TEXT: Record<string, string> = {
+  CONVERSATION_NOT_FOUND: "会话不存在",
+  CONVERSATION_DELETED: "会话已删除",
+  CONVERSATION_ARCHIVED: "会话已归档,请先恢复后再发送",
+  CONVERSATION_REQUEST_IN_PROGRESS: "这个会话还有回答在进行中,请先等它完成",
+  PROVIDER_LOGIN_REQUIRED: "Gemini 未登录,请在服务端浏览器里重新登录",
+  PROVIDER_BUSY: "浏览器正忙,稍后再试",
+  PROVIDER_NAVIGATION_FAILED: "连不上 Gemini,请稍后重试",
+  PROVIDER_RESPONSE_TIMEOUT: "Gemini 回答超时",
+  PROVIDER_CANCELLATION_UNCONFIRMED:
+    "无法确认 Gemini 已停止生成,浏览器正在重建",
+  PROVIDER_BROWSER_CRASHED: "浏览器崩溃,正在自动恢复",
+  PROVIDER_PAGE_CLOSED: "Gemini 页面被关闭,请重试",
+  PROVIDER_CONVERSATION_UNAVAILABLE: "Gemini 会话已失效,请新建会话",
+  SERVER_RESTARTED_DURING_PROCESSING: "服务重启导致回答中断,请重新发送",
+  SERVER_RESTARTED_DURING_CANCELLING: "服务重启时正在停止生成,请重新发送",
+  NETWORK_ERROR: "连不上后端服务",
+};
 
-    mask: createEmptyMask(),
+export function errorTextForCode(code?: string | null): string {
+  if (!code) return "回答失败";
+  return ERROR_TEXT[code] ?? code;
+}
+
+export function backendErrorMessage(error: unknown): string {
+  if (error instanceof BackendApiError) {
+    return ERROR_TEXT[error.code] ?? `${error.code}: ${error.message}`;
+  }
+  if (error instanceof Error && ERROR_TEXT[error.name]) {
+    return ERROR_TEXT[error.name];
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function notifyError(error: unknown) {
+  console.error("[Chat] 请求失败", error);
+  showToast(backendErrorMessage(error));
+}
+
+function createBackendMask(): Mask {
+  const mask = createEmptyMask();
+  return {
+    ...mask,
+    name: BACKEND_MODEL_LABEL,
+    modelConfig: { ...mask.modelConfig, model: BACKEND_MODEL_LABEL },
   };
 }
 
-function getSummarizeModel(
-  currentModel: string,
-  providerName: string,
-): string[] {
-  // if it is using gpt-* models, force to use 4o-mini to summarize
-  if (currentModel.startsWith("gpt") || currentModel.startsWith("chatgpt")) {
-    const configStore = useAppConfig.getState();
-    const accessStore = useAccessStore.getState();
-    const allModel = collectModelsWithDefaultModel(
-      configStore.models,
-      [configStore.customModels, accessStore.customModels].join(","),
-      accessStore.defaultModel,
-    );
-    const summarizeModel = allModel.find(
-      (m) => m.name === SUMMARIZE_MODEL && m.available,
-    );
-    if (summarizeModel) {
-      return [
-        summarizeModel.name,
-        summarizeModel.provider?.providerName as string,
-      ];
-    }
-  }
-  if (currentModel.startsWith("gemini")) {
-    return [GEMINI_SUMMARIZE_MODEL, ServiceProvider.Google];
-  } else if (currentModel.startsWith("deepseek-")) {
-    return [DEEPSEEK_SUMMARIZE_MODEL, ServiceProvider.DeepSeek];
-  }
-
-  return [currentModel, providerName];
+function emptyStat(): ChatStat {
+  return { tokenCount: 0, wordCount: 0, charCount: 0 };
 }
 
-function countMessages(msgs: ChatMessage[]) {
-  return msgs.reduce(
-    (pre, cur) => pre + estimateTokenLength(getMessageTextContent(cur)),
-    0,
+export function createDraftSession(): ChatSession {
+  return {
+    id: `draft-${nanoid()}`,
+    topic: DEFAULT_TOPIC,
+    messages: [],
+    stat: emptyStat(),
+    lastUpdate: Date.now(),
+    mask: createBackendMask(),
+    draft: true,
+    loaded: true,
+    conversationStatus: "ACTIVE",
+  };
+}
+
+/**
+ * 首屏拉列表期间 currentSession() 返回这个占位会话。
+ * 它不在 sessions 数组里,所以 updateTargetSession 会按 id 找不到而空转,
+ * 不会把数据写进一个不存在的会话。
+ */
+const PLACEHOLDER_SESSION = createDraftSession();
+
+/** 每条会话最多一个在途 SSE 订阅(后端本身就禁止同会话并发 Request) */
+const subscriptions = new Map<string, RequestEventSubscription>();
+
+function closeSubscription(conversationId: string) {
+  subscriptions.get(conversationId)?.close();
+  subscriptions.delete(conversationId);
+}
+
+/** 后端 role 是大写枚举,NextChat 用小写 */
+function toChatRole(role: BackendMessage["role"]): MessageRole {
+  return role === "USER" ? "user" : "assistant";
+}
+
+/**
+ * 状态映射(第 7 阶段 §六):
+ * PENDING / STREAMING → streaming(加载 / 逐字),COMPLETED → 完成,FAILED → 错误。
+ * 不引入第二套状态,复用 NextChat 的 streaming + isError 两个标记。
+ */
+function toChatMessage(message: BackendMessage): ChatMessage {
+  const failed = message.status === "FAILED";
+  const request = message.request ?? null;
+  return {
+    id: message.id,
+    role: toChatRole(message.role),
+    content: message.content,
+    date: new Date(message.createdAt).toLocaleString(),
+    streaming:
+      message.role === "ASSISTANT" && !isMessageSettled(message.status),
+    isError: message.role === "ASSISTANT" && failed,
+    errorCode: failed ? request?.errorCode ?? undefined : undefined,
+    model: BACKEND_MODEL_LABEL,
+  };
+}
+
+function isMessageSettled(status: BackendMessage["status"]): boolean {
+  return (
+    status === "COMPLETED" || status === "FAILED" || status === "CANCELLED"
   );
 }
 
-function fillTemplateWith(input: string, modelConfig: ModelConfig) {
-  const cutoff =
-    KnowledgeCutOffDate[modelConfig.model] ?? KnowledgeCutOffDate.default;
-  // Find the model in the DEFAULT_MODELS array that matches the modelConfig.model
-  const modelInfo = DEFAULT_MODELS.find((m) => m.name === modelConfig.model);
-
-  var serviceProvider = "OpenAI";
-  if (modelInfo) {
-    // TODO: auto detect the providerName from the modelConfig.model
-
-    // Directly use the providerName from the modelInfo
-    serviceProvider = modelInfo.provider.providerName;
+function applyStatusToMessage(
+  message: ChatMessage,
+  frame: RequestStatusFrame,
+  session?: ChatSession,
+): void {
+  if (frame.requestStatus === "CANCELLING") {
+    message.streaming = true;
+    if (session) session.cancelling = true;
+    return;
   }
+  if (frame.status) {
+    message.streaming = !isMessageSettled(frame.status);
+    message.isError = frame.status === "FAILED";
+  }
+  if (frame.requestStatus === "CANCELLED") {
+    message.streaming = false;
+    message.isError = false;
+    if (session) session.cancelling = false;
+  }
+  if (isRequestFinished(frame.requestStatus)) {
+    message.streaming = false;
+    if (session) session.cancelling = false;
+  }
+  if (
+    frame.requestStatus === "FAILED" ||
+    frame.requestStatus === "TIMEOUT" ||
+    frame.status === "FAILED"
+  ) {
+    message.isError = true;
+    message.errorCode = frame.errorCode ?? message.errorCode;
+  }
+}
 
-  const vars = {
-    ServiceProvider: serviceProvider,
-    cutoff,
-    model: modelConfig.model,
-    time: new Date().toString(),
-    lang: getLang(),
-    input: input,
+function toChatSession(conversation: {
+  id: string;
+  title: string;
+  status: string;
+  updatedAt: string;
+}): ChatSession {
+  return {
+    id: conversation.id,
+    topic: conversation.title,
+    messages: [],
+    stat: emptyStat(),
+    lastUpdate: new Date(conversation.updatedAt).getTime(),
+    mask: createBackendMask(),
+    draft: false,
+    loaded: false,
+    conversationStatus:
+      conversation.status === "ARCHIVED" ? "ARCHIVED" : "ACTIVE",
   };
-
-  let output = modelConfig.template ?? DEFAULT_INPUT_TEMPLATE;
-
-  // remove duplicate
-  if (input.startsWith(output)) {
-    output = "";
-  }
-
-  // must contains {{input}}
-  const inputVar = "{{input}}";
-  if (!output.includes(inputVar)) {
-    output += "\n" + inputVar;
-  }
-
-  Object.entries(vars).forEach(([name, value]) => {
-    const regex = new RegExp(`{{${name}}}`, "g");
-    output = output.replace(regex, value.toString()); // Ensure value is a string
-  });
-
-  return output;
 }
 
-async function getMcpSystemPrompt(): Promise<string> {
-  const tools = await getAllTools();
-
-  let toolsStr = "";
-
-  tools.forEach((i) => {
-    // error client has no tools
-    if (!i.tools) return;
-
-    toolsStr += MCP_TOOLS_TEMPLATE.replace(
-      "{{ clientId }}",
-      i.clientId,
-    ).replace(
-      "{{ tools }}",
-      i.tools.tools.map((p: object) => JSON.stringify(p, null, 2)).join("\n"),
-    );
-  });
-
-  return MCP_SYSTEM_TEMPLATE.replace("{{ MCP_TOOLS }}", toolsStr);
+interface ChatState {
+  sessions: ChatSession[];
+  currentSessionIndex: number;
+  lastInput: string;
+  /** 会话列表是否已完成首次加载 */
+  ready: boolean;
+  loadingList: boolean;
+  /** 当前列表展示 ACTIVE 还是 ARCHIVED */
+  listStatus: ConversationStatus;
 }
 
-const DEFAULT_CHAT_STATE = {
-  sessions: [createEmptySession()],
+interface ChatActions {
+  bootstrap(): Promise<void>;
+  reloadList(): Promise<void>;
+  switchListStatus(status: ConversationStatus): Promise<void>;
+  loadSessionMessages(sessionId: string): Promise<void>;
+  refreshSessionMessages(sessionId: string): Promise<void>;
+  selectSession(index: number): void;
+  nextSession(delta: number): void;
+  newSession(mask?: Mask): void;
+  moveSession(from: number, to: number): void;
+  deleteSession(index: number): Promise<void>;
+  archiveSession(index: number): Promise<void>;
+  restoreSession(index: number): Promise<void>;
+  renameSession(sessionId: string, title: string): Promise<void>;
+  currentSession(): ChatSession;
+  updateTargetSession(
+    targetSession: ChatSession,
+    updater: (session: ChatSession) => void,
+  ): void;
+  setLastInput(lastInput: string): void;
+  onUserInput(content: string, attachImages?: string[]): Promise<void>;
+  followRequest(
+    conversationId: string,
+    requestId: string,
+    messageId: string,
+  ): void;
+  cancelRequest(conversationId: string): Promise<void>;
+  clearAllData(): Promise<void>;
+}
+
+export type ChatStore = ChatState & ChatActions;
+
+const DEFAULT_CHAT_STATE: ChatState = {
+  sessions: [],
   currentSessionIndex: 0,
   lastInput: "",
+  ready: false,
+  loadingList: false,
+  listStatus: "ACTIVE",
 };
 
-export const useChatStore = createPersistStore(
-  DEFAULT_CHAT_STATE,
-  (set, _get) => {
-    function get() {
-      return {
-        ..._get(),
-        ...methods,
+export const useChatStore = create<ChatStore>()((set, get) => {
+  /** 按 id 改某条消息:订阅回调可能在会话切换 / 删除之后才到达 */
+  function patchMessage(
+    sessionId: string,
+    messageId: string,
+    updater: (message: ChatMessage) => void,
+  ) {
+    const state = get();
+    const session = state.sessions.find((s) => s.id === sessionId);
+    const message = session?.messages.find((m) => m.id === messageId);
+    if (!session || !message) return;
+    updater(message);
+    // messages 必须换成新数组才会触发渲染
+    set({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId ? { ...s, messages: s.messages.slice() } : s,
+      ),
+    });
+  }
+
+  function setPendingRequest(conversationId: string, requestId?: string) {
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === conversationId ? { ...s, pendingRequestId: requestId } : s,
+      ),
+    }));
+  }
+
+  /** 草稿会话在第一次发送时才真正建到后端 */
+  async function ensureConversation(
+    session: ChatSession,
+    text: string,
+  ): Promise<string> {
+    if (!session.draft) return session.id;
+
+    const created = await createConversation(trimTopic(text) || DEFAULT_TOPIC);
+    set((state) => {
+      const index = state.sessions.findIndex((s) => s.id === session.id);
+      const replaced: ChatSession = {
+        ...createDraftSession(),
+        id: created.id,
+        topic: created.title,
+        draft: false,
+        loaded: true,
+        lastUpdate: new Date(created.updatedAt).getTime(),
       };
-    }
-
-    const methods = {
-      forkSession() {
-        // 获取当前会话
-        const currentSession = get().currentSession();
-        if (!currentSession) return;
-
-        const newSession = createEmptySession();
-
-        newSession.topic = currentSession.topic;
-        // 深拷贝消息
-        newSession.messages = currentSession.messages.map((msg) => ({
-          ...msg,
-          id: nanoid(), // 生成新的消息 ID
-        }));
-        newSession.mask = {
-          ...currentSession.mask,
-          modelConfig: {
-            ...currentSession.mask.modelConfig,
-          },
+      if (index < 0) {
+        return {
+          sessions: [replaced, ...state.sessions],
+          currentSessionIndex: 0,
         };
+      }
+      const sessions = state.sessions.slice();
+      sessions[index] = replaced;
+      return { sessions, currentSessionIndex: index };
+    });
+    return created.id;
+  }
 
-        set((state) => ({
-          currentSessionIndex: 0,
-          sessions: [newSession, ...state.sessions],
-        }));
-      },
+  const actions: ChatActions = {
+    /** 首屏:会话列表来自后端,顺带清掉第 7 阶段之前残留的本地聊天数据 */
+    async bootstrap() {
+      if (get().ready || get().loadingList) return;
+      try {
+        // 旧版本把 Conversation / Message 存在 IndexedDB,必须抹掉,
+        // 否则本地脏数据看起来像是盖住了后端真相
+        await indexedDBStorage.removeItem(StoreKey.Chat);
+        localStorage.removeItem(StoreKey.Chat);
+      } catch (error) {
+        console.warn("[Chat] 清理本地聊天数据失败", error);
+      }
+      await get().reloadList();
+    },
 
-      clearSessions() {
-        set(() => ({
-          sessions: [createEmptySession()],
-          currentSessionIndex: 0,
-        }));
-      },
-
-      selectSession(index: number) {
-        set({
-          currentSessionIndex: index,
-        });
-      },
-
-      moveSession(from: number, to: number) {
+    /** 重新拉列表:发送 / 完成 / 改名之后顺序与标题会跟着变 */
+    async reloadList() {
+      if (get().loadingList) return;
+      set({ loadingList: true });
+      const status = get().listStatus;
+      try {
+        const { items } = await listConversations(status);
         set((state) => {
-          const { sessions, currentSessionIndex: oldIndex } = state;
-
-          // move the session
-          const newSessions = [...sessions];
-          const session = newSessions[from];
-          newSessions.splice(from, 1);
-          newSessions.splice(to, 0, session);
-
-          // modify current session id
-          let newIndex = oldIndex === from ? to : oldIndex;
-          if (oldIndex > from && oldIndex <= to) {
-            newIndex -= 1;
-          } else if (oldIndex < from && oldIndex >= to) {
-            newIndex += 1;
+          const drafts = state.sessions.filter((s) => s.draft);
+          const merged = items.map((conversation) => {
+            const fresh = toChatSession(conversation);
+            const current = state.sessions.find((s) => s.id === fresh.id);
+            if (!current) return fresh;
+            // 保留已加载的消息与在途状态,只更新顺序和后端标题
+            return {
+              ...fresh,
+              messages: current.messages,
+              loaded: current.loaded,
+              loadingMessages: current.loadingMessages,
+              pendingRequestId: current.pendingRequestId,
+              conversationStatus: current.conversationStatus,
+              topic: current.topic || fresh.topic,
+            };
+          });
+          const sessions = [...drafts, ...merged];
+          if (!sessions.length && status === "ACTIVE") {
+            sessions.push(createDraftSession());
           }
-
+          const activeId = state.sessions[state.currentSessionIndex]?.id;
+          const index = sessions.findIndex((s) => s.id === activeId);
           return {
-            currentSessionIndex: newIndex,
-            sessions: newSessions,
+            sessions,
+            currentSessionIndex: index >= 0 ? index : 0,
+            ready: true,
+            loadingList: false,
           };
         });
-      },
+        const active = get().sessions[get().currentSessionIndex];
+        if (active) void get().loadSessionMessages(active.id);
+      } catch (error) {
+        set({ loadingList: false });
+        notifyError(error);
+      }
+    },
 
-      newSession(mask?: Mask) {
-        const session = createEmptySession();
+    /** 会话列表在 ACTIVE / ARCHIVED 之间切换(§七) */
+    async switchListStatus(status: ConversationStatus) {
+      if (get().listStatus === status && get().ready) return;
+      subscriptions.forEach((subscription) => subscription.close());
+      subscriptions.clear();
+      set({
+        listStatus: status,
+        sessions: [],
+        currentSessionIndex: 0,
+        ready: false,
+      });
+      await get().reloadList();
+    },
 
-        if (mask) {
-          const config = useAppConfig.getState();
-          const globalModelConfig = config.modelConfig;
+    /** 打开会话:未加载过就拉消息,并续接仍在执行的 Request(§八) */
+    async loadSessionMessages(sessionId: string) {
+      const session = get().sessions.find((s) => s.id === sessionId);
+      if (
+        !session ||
+        session.draft ||
+        session.loaded ||
+        session.loadingMessages
+      )
+        return;
 
-          session.mask = {
-            ...mask,
-            modelConfig: {
-              ...globalModelConfig,
-              ...mask.modelConfig,
-            },
-          };
-          session.topic = mask.name;
-        }
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, loadingMessages: true } : s,
+        ),
+      }));
 
+      try {
+        const messages = await listMessages(sessionId);
+        const running = messages.find(
+          (m) =>
+            m.role === "ASSISTANT" &&
+            m.request &&
+            !isRequestFinished(m.request.status),
+        );
         set((state) => ({
-          currentSessionIndex: 0,
-          sessions: [session].concat(state.sessions),
+          sessions: state.sessions.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  messages: messages.map(toChatMessage),
+                  loaded: true,
+                  loadingMessages: false,
+                  pendingRequestId: running?.request?.id,
+                }
+              : s,
+          ),
         }));
-      },
-
-      nextSession(delta: number) {
-        const n = get().sessions.length;
-        const limit = (x: number) => (x + n) % n;
-        const i = get().currentSessionIndex;
-        get().selectSession(limit(i + delta));
-      },
-
-      deleteSession(index: number) {
-        const deletingLastSession = get().sessions.length === 1;
-        const deletedSession = get().sessions.at(index);
-
-        if (!deletedSession) return;
-
-        const sessions = get().sessions.slice();
-        sessions.splice(index, 1);
-
-        const currentIndex = get().currentSessionIndex;
-        let nextIndex = Math.min(
-          currentIndex - Number(index < currentIndex),
-          sessions.length - 1,
-        );
-
-        if (deletingLastSession) {
-          nextIndex = 0;
-          sessions.push(createEmptySession());
+        if (running?.request) {
+          get().followRequest(sessionId, running.request.id, running.id);
         }
+      } catch (error) {
+        set((state) => ({
+          sessions: state.sessions.map((s) =>
+            s.id === sessionId ? { ...s, loadingMessages: false } : s,
+          ),
+        }));
+        notifyError(error);
+      }
+    },
 
-        // for undo delete action
-        const restoreState = {
-          currentSessionIndex: get().currentSessionIndex,
-          sessions: get().sessions.slice(),
+    /** 手动刷新:重新拉后端历史,顺带续接可能仍在执行的 Request */
+    async refreshSessionMessages(sessionId: string) {
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId
+            ? { ...s, loaded: false, loadingMessages: false }
+            : s,
+        ),
+      }));
+      await get().loadSessionMessages(sessionId);
+    },
+
+    selectSession(index: number) {
+      set({ currentSessionIndex: index });
+      const session = get().sessions[index];
+      if (session) void get().loadSessionMessages(session.id);
+    },
+
+    nextSession(delta: number) {
+      const n = get().sessions.length;
+      if (!n) return;
+      const limit = (x: number) => (x + n) % n;
+      get().selectSession(limit(get().currentSessionIndex + delta));
+    },
+
+    newSession(mask?: Mask) {
+      const session = createDraftSession();
+      if (mask) {
+        session.mask = {
+          ...mask,
+          modelConfig: { ...mask.modelConfig, model: BACKEND_MODEL_LABEL },
         };
-
-        set(() => ({
-          currentSessionIndex: nextIndex,
-          sessions,
+        session.topic = mask.name;
+      }
+      // 正在看归档列表时,草稿必须落在「进行中」列表,否则会在下次 reloadList 时消失
+      if (get().listStatus !== "ACTIVE") {
+        set((state) => ({
+          listStatus: "ACTIVE",
+          ready: false,
+          currentSessionIndex: 0,
+          sessions: [session],
         }));
+        void get().reloadList();
+        return;
+      }
+      set((state) => ({
+        currentSessionIndex: 0,
+        sessions: [session, ...state.sessions],
+      }));
+    },
 
-        showToast(
-          Locale.Home.DeleteToast,
-          {
-            text: Locale.Home.Revert,
-            onClick() {
-              set(() => restoreState);
-            },
-          },
-          5000,
-        );
-      },
+    /** 拖动排序只是本次浏览的顺序,后端没有排序字段 */
+    moveSession(from: number, to: number) {
+      set((state) => {
+        const sessions = [...state.sessions];
+        const session = sessions.splice(from, 1)[0];
+        sessions.splice(to, 0, session);
+        const old = state.currentSessionIndex;
+        let index = old;
+        if (old === from) index = to;
+        else if (from < old && to >= old) index = old - 1;
+        else if (from > old && to <= old) index = old + 1;
+        return { sessions, currentSessionIndex: index };
+      });
+    },
 
-      currentSession() {
-        let index = get().currentSessionIndex;
-        const sessions = get().sessions;
+    /** 后端软删除不可恢复,所以没有 5 秒撤销(§十) */
+    async deleteSession(index: number) {
+      const session = get().sessions.at(index);
+      if (!session) return;
 
-        if (index < 0 || index >= sessions.length) {
-          index = Math.min(sessions.length - 1, Math.max(0, index));
-          set(() => ({ currentSessionIndex: index }));
-        }
-
-        const session = sessions[index];
-
-        return session;
-      },
-
-      onNewMessage(message: ChatMessage, targetSession: ChatSession) {
-        get().updateTargetSession(targetSession, (session) => {
-          session.messages = session.messages.concat();
-          session.lastUpdate = Date.now();
-        });
-
-        get().updateStat(message, targetSession);
-
-        get().checkMcpJson(message);
-
-        get().summarizeSession(false, targetSession);
-      },
-
-      async onUserInput(
-        content: string,
-        attachImages?: string[],
-        isMcpResponse?: boolean,
-      ) {
-        const session = get().currentSession();
-        const modelConfig = session.mask.modelConfig;
-
-        // MCP Response no need to fill template
-        let mContent: string | MultimodalContent[] = isMcpResponse
-          ? content
-          : fillTemplateWith(content, modelConfig);
-
-        if (!isMcpResponse && attachImages && attachImages.length > 0) {
-          mContent = [
-            ...(content ? [{ type: "text" as const, text: content }] : []),
-            ...attachImages.map((url) => ({
-              type: "image_url" as const,
-              image_url: { url },
-            })),
-          ];
-        }
-
-        let userMessage: ChatMessage = createMessage({
-          role: "user",
-          content: mContent,
-          isMcpResponse,
-        });
-
-        const botMessage: ChatMessage = createMessage({
-          role: "assistant",
-          streaming: true,
-          model: modelConfig.model,
-        });
-
-        // get recent messages
-        const recentMessages = await get().getMessagesWithMemory();
-        const sendMessages = recentMessages.concat(userMessage);
-        const messageIndex = session.messages.length + 1;
-
-        // save user's and bot's message
-        get().updateTargetSession(session, (session) => {
-          const savedUserMessage = {
-            ...userMessage,
-            content: mContent,
-          };
-          session.messages = session.messages.concat([
-            savedUserMessage,
-            botMessage,
-          ]);
-        });
-
-        const api: ClientApi = getClientApi(modelConfig.providerName);
-        // make request
-        api.llm.chat({
-          messages: sendMessages,
-          config: { ...modelConfig, stream: true },
-          onUpdate(message) {
-            botMessage.streaming = true;
-            if (message) {
-              botMessage.content = message;
-            }
-            get().updateTargetSession(session, (session) => {
-              session.messages = session.messages.concat();
-            });
-          },
-          async onFinish(message) {
-            botMessage.streaming = false;
-            if (message) {
-              botMessage.content = message;
-              botMessage.date = new Date().toLocaleString();
-              get().onNewMessage(botMessage, session);
-            }
-            ChatControllerPool.remove(session.id, botMessage.id);
-          },
-          onBeforeTool(tool: ChatMessageTool) {
-            (botMessage.tools = botMessage?.tools || []).push(tool);
-            get().updateTargetSession(session, (session) => {
-              session.messages = session.messages.concat();
-            });
-          },
-          onAfterTool(tool: ChatMessageTool) {
-            botMessage?.tools?.forEach((t, i, tools) => {
-              if (tool.id == t.id) {
-                tools[i] = { ...tool };
-              }
-            });
-            get().updateTargetSession(session, (session) => {
-              session.messages = session.messages.concat();
-            });
-          },
-          onError(error) {
-            const isAborted = error.message?.includes?.("aborted");
-            botMessage.content +=
-              "\n\n" +
-              prettyObject({
-                error: true,
-                message: error.message,
-              });
-            botMessage.streaming = false;
-            userMessage.isError = !isAborted;
-            botMessage.isError = !isAborted;
-            get().updateTargetSession(session, (session) => {
-              session.messages = session.messages.concat();
-            });
-            ChatControllerPool.remove(
-              session.id,
-              botMessage.id ?? messageIndex,
-            );
-
-            console.error("[Chat] failed ", error);
-          },
-          onController(controller) {
-            // collect controller for stop/retry
-            ChatControllerPool.addController(
-              session.id,
-              botMessage.id ?? messageIndex,
-              controller,
-            );
-          },
-        });
-      },
-
-      getMemoryPrompt() {
-        const session = get().currentSession();
-
-        if (session.memoryPrompt.length) {
-          return {
-            role: "system",
-            content: Locale.Store.Prompt.History(session.memoryPrompt),
-            date: "",
-          } as ChatMessage;
-        }
-      },
-
-      async getMessagesWithMemory() {
-        const session = get().currentSession();
-        const modelConfig = session.mask.modelConfig;
-        const clearContextIndex = session.clearContextIndex ?? 0;
-        const messages = session.messages.slice();
-        const totalMessageCount = session.messages.length;
-
-        // in-context prompts
-        const contextPrompts = session.mask.context.slice();
-
-        // system prompts, to get close to OpenAI Web ChatGPT
-        const shouldInjectSystemPrompts =
-          modelConfig.enableInjectSystemPrompts &&
-          (session.mask.modelConfig.model.startsWith("gpt-") ||
-            session.mask.modelConfig.model.startsWith("chatgpt-"));
-
-        const mcpEnabled = await isMcpEnabled();
-        const mcpSystemPrompt = mcpEnabled ? await getMcpSystemPrompt() : "";
-
-        var systemPrompts: ChatMessage[] = [];
-
-        if (shouldInjectSystemPrompts) {
-          systemPrompts = [
-            createMessage({
-              role: "system",
-              content:
-                fillTemplateWith("", {
-                  ...modelConfig,
-                  template: DEFAULT_SYSTEM_TEMPLATE,
-                }) + mcpSystemPrompt,
-            }),
-          ];
-        } else if (mcpEnabled) {
-          systemPrompts = [
-            createMessage({
-              role: "system",
-              content: mcpSystemPrompt,
-            }),
-          ];
-        }
-
-        if (shouldInjectSystemPrompts || mcpEnabled) {
-          console.log(
-            "[Global System Prompt] ",
-            systemPrompts.at(0)?.content ?? "empty",
-          );
-        }
-        const memoryPrompt = get().getMemoryPrompt();
-        // long term memory
-        const shouldSendLongTermMemory =
-          modelConfig.sendMemory &&
-          session.memoryPrompt &&
-          session.memoryPrompt.length > 0 &&
-          session.lastSummarizeIndex > clearContextIndex;
-        const longTermMemoryPrompts =
-          shouldSendLongTermMemory && memoryPrompt ? [memoryPrompt] : [];
-        const longTermMemoryStartIndex = session.lastSummarizeIndex;
-
-        // short term memory
-        const shortTermMemoryStartIndex = Math.max(
-          0,
-          totalMessageCount - modelConfig.historyMessageCount,
-        );
-
-        // lets concat send messages, including 4 parts:
-        // 0. system prompt: to get close to OpenAI Web ChatGPT
-        // 1. long term memory: summarized memory messages
-        // 2. pre-defined in-context prompts
-        // 3. short term memory: latest n messages
-        // 4. newest input message
-        const memoryStartIndex = shouldSendLongTermMemory
-          ? Math.min(longTermMemoryStartIndex, shortTermMemoryStartIndex)
-          : shortTermMemoryStartIndex;
-        // and if user has cleared history messages, we should exclude the memory too.
-        const contextStartIndex = Math.max(clearContextIndex, memoryStartIndex);
-        const maxTokenThreshold = modelConfig.max_tokens;
-
-        // get recent messages as much as possible
-        const reversedRecentMessages = [];
-        for (
-          let i = totalMessageCount - 1, tokenCount = 0;
-          i >= contextStartIndex && tokenCount < maxTokenThreshold;
-          i -= 1
-        ) {
-          const msg = messages[i];
-          if (!msg || msg.isError) continue;
-          tokenCount += estimateTokenLength(getMessageTextContent(msg));
-          reversedRecentMessages.push(msg);
-        }
-        // concat all messages
-        const recentMessages = [
-          ...systemPrompts,
-          ...longTermMemoryPrompts,
-          ...contextPrompts,
-          ...reversedRecentMessages.reverse(),
-        ];
-
-        return recentMessages;
-      },
-
-      updateMessage(
-        sessionIndex: number,
-        messageIndex: number,
-        updater: (message?: ChatMessage) => void,
-      ) {
-        const sessions = get().sessions;
-        const session = sessions.at(sessionIndex);
-        const messages = session?.messages;
-        updater(messages?.at(messageIndex));
-        set(() => ({ sessions }));
-      },
-
-      resetSession(session: ChatSession) {
-        get().updateTargetSession(session, (session) => {
-          session.messages = [];
-          session.memoryPrompt = "";
-        });
-      },
-
-      summarizeSession(
-        refreshTitle: boolean = false,
-        targetSession: ChatSession,
-      ) {
-        const config = useAppConfig.getState();
-        const session = targetSession;
-        const modelConfig = session.mask.modelConfig;
-        // skip summarize when using dalle3?
-        if (isDalle3(modelConfig.model)) {
+      if (!session.draft) {
+        closeSubscription(session.id);
+        try {
+          await deleteConversation(session.id);
+        } catch (error) {
+          notifyError(error);
           return;
         }
+      }
 
-        // if not config compressModel, then using getSummarizeModel
-        const [model, providerName] = modelConfig.compressModel
-          ? [modelConfig.compressModel, modelConfig.compressProviderName]
-          : getSummarizeModel(
-              session.mask.modelConfig.model,
-              session.mask.modelConfig.providerName,
-            );
-        const api: ClientApi = getClientApi(providerName as ServiceProvider);
-
-        // remove error messages if any
-        const messages = session.messages;
-
-        // should summarize topic after chating more than 50 words
-        const SUMMARIZE_MIN_LEN = 50;
-        if (
-          (config.enableAutoGenerateTitle &&
-            session.topic === DEFAULT_TOPIC &&
-            countMessages(messages) >= SUMMARIZE_MIN_LEN) ||
-          refreshTitle
-        ) {
-          const startIndex = Math.max(
-            0,
-            messages.length - modelConfig.historyMessageCount,
-          );
-          const topicMessages = messages
-            .slice(
-              startIndex < messages.length ? startIndex : messages.length - 1,
-              messages.length,
-            )
-            .concat(
-              createMessage({
-                role: "user",
-                content: Locale.Store.Prompt.Topic,
-              }),
-            );
-          api.llm.chat({
-            messages: topicMessages,
-            config: {
-              model,
-              stream: false,
-              providerName,
-            },
-            onFinish(message, responseRes) {
-              if (responseRes?.status === 200) {
-                get().updateTargetSession(
-                  session,
-                  (session) =>
-                    (session.topic =
-                      message.length > 0 ? trimTopic(message) : DEFAULT_TOPIC),
-                );
-              }
-            },
-          });
-        }
-        const summarizeIndex = Math.max(
-          session.lastSummarizeIndex,
-          session.clearContextIndex ?? 0,
+      set((state) => {
+        const sessions = state.sessions.slice();
+        sessions.splice(index, 1);
+        if (!sessions.length && get().listStatus === "ACTIVE")
+          sessions.push(createDraftSession());
+        const next = Math.max(
+          0,
+          Math.min(state.currentSessionIndex, sessions.length - 1),
         );
-        let toBeSummarizedMsgs = messages
-          .filter((msg) => !msg.isError)
-          .slice(summarizeIndex);
-
-        const historyMsgLength = countMessages(toBeSummarizedMsgs);
-
-        if (historyMsgLength > (modelConfig?.max_tokens || 4000)) {
-          const n = toBeSummarizedMsgs.length;
-          toBeSummarizedMsgs = toBeSummarizedMsgs.slice(
-            Math.max(0, n - modelConfig.historyMessageCount),
-          );
-        }
-        const memoryPrompt = get().getMemoryPrompt();
-        if (memoryPrompt) {
-          // add memory prompt
-          toBeSummarizedMsgs.unshift(memoryPrompt);
-        }
-
-        const lastSummarizeIndex = session.messages.length;
-
-        console.log(
-          "[Chat History] ",
-          toBeSummarizedMsgs,
-          historyMsgLength,
-          modelConfig.compressMessageLengthThreshold,
-        );
-
-        if (
-          historyMsgLength > modelConfig.compressMessageLengthThreshold &&
-          modelConfig.sendMemory
-        ) {
-          /** Destruct max_tokens while summarizing
-           * this param is just shit
-           **/
-          const { max_tokens, ...modelcfg } = modelConfig;
-          api.llm.chat({
-            messages: toBeSummarizedMsgs.concat(
-              createMessage({
-                role: "system",
-                content: Locale.Store.Prompt.Summarize,
-                date: "",
-              }),
-            ),
-            config: {
-              ...modelcfg,
-              stream: true,
-              model,
-              providerName,
-            },
-            onUpdate(message) {
-              session.memoryPrompt = message;
-            },
-            onFinish(message, responseRes) {
-              if (responseRes?.status === 200) {
-                console.log("[Memory] ", message);
-                get().updateTargetSession(session, (session) => {
-                  session.lastSummarizeIndex = lastSummarizeIndex;
-                  session.memoryPrompt = message; // Update the memory prompt for stored it in local storage
-                });
-              }
-            },
-            onError(err) {
-              console.error("[Summarize] ", err);
-            },
-          });
-        }
-      },
-
-      updateStat(message: ChatMessage, session: ChatSession) {
-        get().updateTargetSession(session, (session) => {
-          session.stat.charCount += message.content.length;
-          // TODO: should update chat count and word count
-        });
-      },
-      updateTargetSession(
-        targetSession: ChatSession,
-        updater: (session: ChatSession) => void,
-      ) {
-        const sessions = get().sessions;
-        const index = sessions.findIndex((s) => s.id === targetSession.id);
-        if (index < 0) return;
-        updater(sessions[index]);
-        set(() => ({ sessions }));
-      },
-      async clearAllData() {
-        await indexedDBStorage.clear();
-        localStorage.clear();
-        location.reload();
-      },
-      setLastInput(lastInput: string) {
-        set({
-          lastInput,
-        });
-      },
-
-      /** check if the message contains MCP JSON and execute the MCP action */
-      checkMcpJson(message: ChatMessage) {
-        const mcpEnabled = isMcpEnabled();
-        if (!mcpEnabled) return;
-        const content = getMessageTextContent(message);
-        if (isMcpJson(content)) {
-          try {
-            const mcpRequest = extractMcpJson(content);
-            if (mcpRequest) {
-              console.debug("[MCP Request]", mcpRequest);
-
-              executeMcpAction(mcpRequest.clientId, mcpRequest.mcp)
-                .then((result) => {
-                  console.log("[MCP Response]", result);
-                  const mcpResponse =
-                    typeof result === "object"
-                      ? JSON.stringify(result)
-                      : String(result);
-                  get().onUserInput(
-                    `\`\`\`json:mcp-response:${mcpRequest.clientId}\n${mcpResponse}\n\`\`\``,
-                    [],
-                    true,
-                  );
-                })
-                .catch((error) => showToast("MCP execution failed", error));
-            }
-          } catch (error) {
-            console.error("[Check MCP JSON]", error);
-          }
-        }
-      },
-    };
-
-    return methods;
-  },
-  {
-    name: StoreKey.Chat,
-    version: 3.3,
-    migrate(persistedState, version) {
-      const state = persistedState as any;
-      const newState = JSON.parse(
-        JSON.stringify(state),
-      ) as typeof DEFAULT_CHAT_STATE;
-
-      if (version < 2) {
-        newState.sessions = [];
-
-        const oldSessions = state.sessions;
-        for (const oldSession of oldSessions) {
-          const newSession = createEmptySession();
-          newSession.topic = oldSession.topic;
-          newSession.messages = [...oldSession.messages];
-          newSession.mask.modelConfig.sendMemory = true;
-          newSession.mask.modelConfig.historyMessageCount = 4;
-          newSession.mask.modelConfig.compressMessageLengthThreshold = 1000;
-          newState.sessions.push(newSession);
-        }
-      }
-
-      if (version < 3) {
-        // migrate id to nanoid
-        newState.sessions.forEach((s) => {
-          s.id = nanoid();
-          s.messages.forEach((m) => (m.id = nanoid()));
-        });
-      }
-
-      // Enable `enableInjectSystemPrompts` attribute for old sessions.
-      // Resolve issue of old sessions not automatically enabling.
-      if (version < 3.1) {
-        newState.sessions.forEach((s) => {
-          if (
-            // Exclude those already set by user
-            !s.mask.modelConfig.hasOwnProperty("enableInjectSystemPrompts")
-          ) {
-            // Because users may have changed this configuration,
-            // the user's current configuration is used instead of the default
-            const config = useAppConfig.getState();
-            s.mask.modelConfig.enableInjectSystemPrompts =
-              config.modelConfig.enableInjectSystemPrompts;
-          }
-        });
-      }
-
-      // add default summarize model for every session
-      if (version < 3.2) {
-        newState.sessions.forEach((s) => {
-          const config = useAppConfig.getState();
-          s.mask.modelConfig.compressModel = config.modelConfig.compressModel;
-          s.mask.modelConfig.compressProviderName =
-            config.modelConfig.compressProviderName;
-        });
-      }
-      // revert default summarize model for every session
-      if (version < 3.3) {
-        newState.sessions.forEach((s) => {
-          const config = useAppConfig.getState();
-          s.mask.modelConfig.compressModel = "";
-          s.mask.modelConfig.compressProviderName = "";
-        });
-      }
-
-      return newState as any;
+        return { sessions, currentSessionIndex: next };
+      });
+      const current = get().sessions[get().currentSessionIndex];
+      if (current) void get().loadSessionMessages(current.id);
     },
-  },
-);
+
+    async archiveSession(index: number) {
+      const session = get().sessions.at(index);
+      if (!session || session.draft) return;
+      try {
+        await patchConversation(session.id, { status: "ARCHIVED" });
+      } catch (error) {
+        notifyError(error);
+        return;
+      }
+      closeSubscription(session.id);
+      set((state) => {
+        const sessions = state.sessions.filter((s) => s.id !== session.id);
+        if (!sessions.length) sessions.push(createDraftSession());
+        const next = Math.max(
+          0,
+          Math.min(state.currentSessionIndex, sessions.length - 1),
+        );
+        return { sessions, currentSessionIndex: next };
+      });
+    },
+
+    /** 归档列表里点「恢复」:PATCH 回 ACTIVE 并从当前列表移除 */
+    async restoreSession(index: number) {
+      const session = get().sessions.at(index);
+      if (!session || session.draft) return;
+      try {
+        await patchConversation(session.id, { status: "ACTIVE" });
+      } catch (error) {
+        notifyError(error);
+        return;
+      }
+      set((state) => ({
+        sessions: state.sessions.filter((s) => s.id !== session.id),
+      }));
+    },
+
+    async renameSession(sessionId: string, title: string) {
+      const value = trimTopic(title);
+      const session = get().sessions.find((s) => s.id === sessionId);
+      if (!session || !value) return;
+      get().updateTargetSession(session, (target) => {
+        target.topic = value;
+      });
+      if (session.draft) return;
+      try {
+        await patchConversation(sessionId, { title: value });
+      } catch (error) {
+        notifyError(error);
+      }
+    },
+
+    currentSession() {
+      const { sessions, currentSessionIndex } = get();
+      if (!sessions.length) return PLACEHOLDER_SESSION;
+      if (currentSessionIndex < 0 || currentSessionIndex >= sessions.length) {
+        const index = Math.min(
+          sessions.length - 1,
+          Math.max(0, currentSessionIndex),
+        );
+        set({ currentSessionIndex: index });
+        return sessions[index];
+      }
+      return sessions[currentSessionIndex];
+    },
+
+    updateTargetSession(
+      targetSession: ChatSession,
+      updater: (session: ChatSession) => void,
+    ) {
+      set((state) => {
+        const index = state.sessions.findIndex(
+          (s) => s.id === targetSession.id,
+        );
+        if (index < 0) return {};
+        const sessions = state.sessions.slice();
+        const session = { ...sessions[index] };
+        updater(session);
+        sessions[index] = session;
+        return { sessions };
+      });
+    },
+
+    setLastInput(lastInput: string) {
+      set({ lastInput });
+    },
+
+    /**
+     * 发送流程(§五):输入 → Conversation(草稿才建)→ POST messages
+     * → requestId + assistantMessageId → SSE delta → 完成。
+     * 上下文由后端 Gemini 会话负责,前端不再拼历史消息。
+     */
+    async onUserInput(content: string, attachImages?: string[]) {
+      const text = content.trim();
+      if (!text) return;
+      if (attachImages?.length) {
+        showToast(ERROR_TEXT.PROVIDER_BUSY);
+        return;
+      }
+
+      let session = get().currentSession();
+      if (session === PLACEHOLDER_SESSION) {
+        get().newSession();
+        session = get().currentSession();
+      }
+      if (session.conversationStatus === "ARCHIVED") {
+        showToast(ERROR_TEXT.CONVERSATION_ARCHIVED);
+        return;
+      }
+
+      const conversationId = await ensureConversation(session, text).catch(
+        (error) => {
+          notifyError(error);
+          return null;
+        },
+      );
+      if (!conversationId) return;
+
+      const pending = get().sessions.find((s) => s.id === conversationId);
+      if (pending?.pendingRequestId) {
+        showToast(ERROR_TEXT.CONVERSATION_REQUEST_IN_PROGRESS);
+        return;
+      }
+
+      try {
+        const result = await sendMessage(
+          conversationId,
+          text,
+          newIdempotencyKey(),
+        );
+        const userMessage = toChatMessage(result.userMessage);
+        const assistantMessage = toChatMessage(result.assistantMessage);
+        assistantMessage.streaming = true;
+
+        get().updateTargetSession(
+          { id: conversationId } as ChatSession,
+          (target) => {
+            target.draft = false;
+            target.loaded = true;
+            target.messages = target.messages.concat([
+              userMessage,
+              assistantMessage,
+            ]);
+            target.lastUpdate = Date.now();
+            target.pendingRequestId = result.request.id;
+          },
+        );
+
+        get().followRequest(
+          conversationId,
+          result.request.id,
+          assistantMessage.id,
+        );
+        void get().reloadList();
+      } catch (error) {
+        notifyError(error);
+        get().updateTargetSession(
+          { id: conversationId } as ChatSession,
+          (target) => {
+            target.messages = target.messages.concat(
+              createMessage({
+                role: "assistant",
+                content: "",
+                isError: true,
+                errorCode:
+                  error instanceof BackendApiError
+                    ? error.code
+                    : "NETWORK_ERROR",
+                model: BACKEND_MODEL_LABEL,
+              }),
+            );
+          },
+        );
+      }
+    },
+
+    /** 订阅(或重新订阅)一条 Request 的回答流 */
+    followRequest(conversationId, requestId, messageId) {
+      closeSubscription(conversationId);
+      const subscription = subscribeRequestEvents(requestId, {
+        onContent(text) {
+          patchMessage(conversationId, messageId, (message) => {
+            message.content = text;
+            message.streaming = true;
+          });
+        },
+        onStatus(frame) {
+          const session = get().sessions.find((s) => s.id === conversationId);
+          patchMessage(conversationId, messageId, (message) => {
+            applyStatusToMessage(message, frame, session);
+          });
+        },
+        onError(error) {
+          patchMessage(conversationId, messageId, (message) => {
+            message.streaming = false;
+            message.isError = true;
+            message.errorCode = error.code;
+          });
+        },
+        onFinish(final) {
+          subscriptions.delete(conversationId);
+          patchMessage(conversationId, messageId, (message) => {
+            message.streaming = false;
+            if (
+              final.status === "FAILED" ||
+              final.requestStatus === "TIMEOUT"
+            ) {
+              message.isError = true;
+            }
+            if (final.requestStatus === "CANCELLED") {
+              message.isError = false;
+            }
+          });
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === conversationId
+                ? { ...s, pendingRequestId: undefined, cancelling: false }
+                : s,
+            ),
+          }));
+          // 终态以数据库为准:内容帧漏收时回读一次,别把空气泡留给用户
+          const settled = get()
+            .sessions.find((s) => s.id === conversationId)
+            ?.messages.find((m) => m.id === messageId);
+          if (
+            (final.status === "COMPLETED" ||
+              final.requestStatus === "CANCELLED") &&
+            settled &&
+            !settled.content
+          ) {
+            void get().refreshSessionMessages(conversationId);
+          }
+          void get().reloadList();
+        },
+      });
+      subscriptions.set(conversationId, subscription);
+    },
+
+    async cancelRequest(conversationId) {
+      const session = get().sessions.find((s) => s.id === conversationId);
+      if (!session?.pendingRequestId) return;
+      try {
+        await cancelBackendRequest(session.pendingRequestId);
+      } catch (error) {
+        if (
+          error instanceof BackendApiError &&
+          error.code === "REQUEST_NOT_CANCELLABLE"
+        ) {
+          void get().refreshSessionMessages(conversationId);
+          return;
+        }
+        notifyError(error);
+      }
+    },
+
+    async clearAllData() {
+      subscriptions.forEach((_, id) => closeSubscription(id));
+      await indexedDBStorage.clear();
+      localStorage.clear();
+      location.reload();
+    },
+  };
+
+  return { ...DEFAULT_CHAT_STATE, ...actions };
+});

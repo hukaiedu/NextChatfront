@@ -45,6 +45,9 @@ const cn = {
       ChatList: "查看消息列表",
       CompressedHistory: "查看压缩后的历史 Prompt",
       Export: "导出聊天记录",
+      Refresh: "刷新消息",
+      Archive: "归档对话",
+      Restore: "恢复对话",
       Copy: "复制",
       Stop: "停止",
       Retry: "重试",
@@ -156,6 +159,8 @@ const cn = {
     DeleteChat: "确认删除选中的对话？",
     DeleteToast: "已删除会话",
     Revert: "撤销",
+    ShowArchived: "查看已归档会话",
+    ShowActive: "查看进行中会话",
   },
   Settings: {
     Title: "设置",
@@ -170,10 +175,10 @@ const cn = {
         Confirm: "确认重置所有设置？",
       },
       Clear: {
-        Title: "清除所有数据",
-        SubTitle: "清除所有聊天、设置数据",
+        Title: "清除本地设置",
+        SubTitle: "清除浏览器里的界面设置与偏好，后端会话不受影响",
         Action: "立即清除",
-        Confirm: "确认清除所有聊天、设置数据？",
+        Confirm: "确认清除本地设置数据？",
       },
     },
     Lang: {

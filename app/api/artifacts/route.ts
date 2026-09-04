@@ -1,73 +1,21 @@
-import md5 from "spark-md5";
-import { NextRequest, NextResponse } from "next/server";
-import { getServerSideConfig } from "@/app/config/server";
+import { NextResponse } from "next/server";
 
-async function handle(req: NextRequest, res: NextResponse) {
-  const serverConfig = getServerSideConfig();
-  const storeUrl = () =>
-    `https://api.cloudflare.com/client/v4/accounts/${serverConfig.cloudflareAccountId}/storage/kv/namespaces/${serverConfig.cloudflareKVNamespaceId}`;
-  const storeHeaders = () => ({
-    Authorization: `Bearer ${serverConfig.cloudflareKVApiKey}`,
-  });
-  if (req.method === "POST") {
-    const clonedBody = await req.text();
-    const hashedCode = md5.hash(clonedBody).trim();
-    const body: {
-      key: string;
-      value: string;
-      expiration_ttl?: number;
-    } = {
-      key: hashedCode,
-      value: clonedBody,
-    };
-    try {
-      const ttl = parseInt(serverConfig.cloudflareKVTTL as string);
-      if (ttl > 60) {
-        body["expiration_ttl"] = ttl;
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    const res = await fetch(`${storeUrl()}/bulk`, {
-      headers: {
-        ...storeHeaders(),
-        "Content-Type": "application/json",
-      },
-      method: "PUT",
-      body: JSON.stringify([body]),
-    });
-    const result = await res.json();
-    console.log("save data", result);
-    if (result?.success) {
-      return NextResponse.json(
-        { code: 0, id: hashedCode, result },
-        { status: res.status },
-      );
-    }
-    return NextResponse.json(
-      { error: true, msg: "Save data error" },
-      { status: 400 },
-    );
-  }
-  if (req.method === "GET") {
-    const id = req?.nextUrl?.searchParams?.get("id");
-    const res = await fetch(`${storeUrl()}/values/${id}`, {
-      headers: storeHeaders(),
-      method: "GET",
-    });
-    return new Response(res.body, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers,
-    });
-  }
+/**
+ * personChat V1：唯一聊天通道为 /backend-api/* → Backend /api/* → Gemini Web。
+ * 旧 Cloudflare KV 分享代理已下线。
+ * 所有 HTTP 方法统一返回 404，绝不进入原 Handler（ISSUE-01）。
+ */
+function disabledV1LegacyRoute() {
   return NextResponse.json(
-    { error: true, msg: "Invalid request" },
-    { status: 400 },
+    { error: true, message: "This legacy route is disabled in personChat V1" },
+    { status: 404 },
   );
 }
 
-export const POST = handle;
-export const GET = handle;
-
-export const runtime = "edge";
+export const GET = disabledV1LegacyRoute;
+export const POST = disabledV1LegacyRoute;
+export const PUT = disabledV1LegacyRoute;
+export const PATCH = disabledV1LegacyRoute;
+export const DELETE = disabledV1LegacyRoute;
+export const OPTIONS = disabledV1LegacyRoute;
+export const HEAD = disabledV1LegacyRoute;

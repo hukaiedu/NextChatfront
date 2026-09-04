@@ -46,6 +46,9 @@ const en: LocaleType = {
       ChatList: "Go To Chat List",
       CompressedHistory: "Compressed History Memory Prompt",
       Export: "Export All Messages as Markdown",
+      Refresh: "Refresh Messages",
+      Archive: "Archive Chat",
+      Restore: "Restore Chat",
       Copy: "Copy",
       Stop: "Stop",
       Retry: "Retry",
@@ -158,6 +161,8 @@ const en: LocaleType = {
     DeleteChat: "Confirm to delete the selected conversation?",
     DeleteToast: "Chat Deleted",
     Revert: "Revert",
+    ShowArchived: "Show archived chats",
+    ShowActive: "Show active chats",
   },
   Settings: {
     Title: "Settings",
@@ -171,10 +176,10 @@ const en: LocaleType = {
         Confirm: "Confirm to reset all settings to default?",
       },
       Clear: {
-        Title: "Clear All Data",
-        SubTitle: "Clear all messages and settings",
+        Title: "Clear Local Settings",
+        SubTitle: "Clear UI settings in this browser; backend chats are kept",
         Action: "Clear",
-        Confirm: "Confirm to clear all messages and settings?",
+        Confirm: "Confirm to clear local settings?",
       },
     },
     Lang: {

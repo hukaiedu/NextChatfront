@@ -12,6 +12,7 @@ import MaskIcon from "../icons/mask.svg";
 import McpIcon from "../icons/mcp.svg";
 import DragIcon from "../icons/drag.svg";
 import DiscoveryIcon from "../icons/discovery.svg";
+import ArchiveIcon from "../icons/archive.svg";
 
 import Locale from "../locales";
 
@@ -35,7 +36,6 @@ import { isMcpEnabled } from "../mcp/actions";
 
 const DISCOVERY = [
   { name: Locale.Plugin.Name, path: Path.Plugins },
-  { name: "Stable Diffusion", path: Path.Sd },
   { name: Locale.SearchChat.Page.Title, path: Path.SearchChat },
 ];
 
@@ -232,6 +232,10 @@ export function SideBar(props: { className?: string }) {
   const config = useAppConfig();
   const chatStore = useChatStore();
   const [mcpEnabled, setMcpEnabled] = useState(false);
+  const listStatusLabel =
+    chatStore.listStatus === "ACTIVE"
+      ? Locale.Home.ShowArchived
+      : Locale.Home.ShowActive;
 
   useEffect(() => {
     // 检查 MCP 是否启用
@@ -325,6 +329,19 @@ export function SideBar(props: { className?: string }) {
                     chatStore.deleteSession(chatStore.currentSessionIndex);
                   }
                 }}
+              />
+            </div>
+            <div className={styles["sidebar-action"]}>
+              <IconButton
+                aria={listStatusLabel}
+                title={listStatusLabel}
+                icon={<ArchiveIcon />}
+                shadow
+                onClick={() =>
+                  chatStore.switchListStatus(
+                    chatStore.listStatus === "ACTIVE" ? "ARCHIVED" : "ACTIVE",
+                  )
+                }
               />
             </div>
             <div className={styles["sidebar-action"]}>

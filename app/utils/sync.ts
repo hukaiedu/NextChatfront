@@ -1,9 +1,4 @@
-import {
-  ChatSession,
-  useAccessStore,
-  useAppConfig,
-  useChatStore,
-} from "../store";
+import { useAccessStore, useAppConfig } from "../store";
 import { useMaskStore } from "../store/mask";
 import { usePromptStore } from "../store/prompt";
 import { StoreKey } from "../constant";
@@ -30,8 +25,9 @@ export type GetStoreState<T> = T extends { getState: () => infer U }
   ? NonFunctionFields<U>
   : never;
 
+// StoreKey.Chat 不在同步范围内:Conversation / Message 的唯一来源是后端 API,
+// 让远端快照写回本地会话等于制造第二个数据源。
 const LocalStateSetters = {
-  [StoreKey.Chat]: useChatStore.setState,
   [StoreKey.Access]: useAccessStore.setState,
   [StoreKey.Config]: useAppConfig.setState,
   [StoreKey.Mask]: useMaskStore.setState,
@@ -39,7 +35,6 @@ const LocalStateSetters = {
 } as const;
 
 const LocalStateGetters = {
-  [StoreKey.Chat]: () => getNonFunctionFileds(useChatStore.getState()),
   [StoreKey.Access]: () => getNonFunctionFileds(useAccessStore.getState()),
   [StoreKey.Config]: () => getNonFunctionFileds(useAppConfig.getState()),
   [StoreKey.Mask]: () => getNonFunctionFileds(useMaskStore.getState()),
@@ -63,43 +58,6 @@ type StateMerger = {
 
 // we merge remote state to local state
 const MergeStates: StateMerger = {
-  [StoreKey.Chat]: (localState, remoteState) => {
-    // merge sessions
-    const localSessions: Record<string, ChatSession> = {};
-    localState.sessions.forEach((s) => (localSessions[s.id] = s));
-
-    remoteState.sessions.forEach((remoteSession) => {
-      // skip empty chats
-      if (remoteSession.messages.length === 0) return;
-
-      const localSession = localSessions[remoteSession.id];
-      if (!localSession) {
-        // if remote session is new, just merge it
-        localState.sessions.push(remoteSession);
-      } else {
-        // if both have the same session id, merge the messages
-        const localMessageIds = new Set(localSession.messages.map((v) => v.id));
-        remoteSession.messages.forEach((m) => {
-          if (!localMessageIds.has(m.id)) {
-            localSession.messages.push(m);
-          }
-        });
-
-        // sort local messages with date field in asc order
-        localSession.messages.sort(
-          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-        );
-      }
-    });
-
-    // sort local sessions with date field in desc order
-    localState.sessions.sort(
-      (a, b) =>
-        new Date(b.lastUpdate).getTime() - new Date(a.lastUpdate).getTime(),
-    );
-
-    return localState;
-  },
   [StoreKey.Prompt]: (localState, remoteState) => {
     localState.prompts = {
       ...remoteState.prompts,
