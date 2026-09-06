@@ -52,6 +52,45 @@ export interface BackendModelCatalog {
   currentModelKey: string | null;
 }
 
+/** 后端 Playwright 浏览器实例的生命周期状态 */
+export type BackendBrowserState =
+  | "RUNNING"
+  | "STARTING"
+  | "RESTARTING"
+  | "STOPPED"
+  | "FAILED";
+
+export interface BackendBrowserError {
+  code: string;
+  message?: string | null;
+  /** 该错误发生时间(ISO) */
+  at?: string | null;
+}
+
+/**
+ * GET /api/browser/status 的负载。
+ *
+ * 除 `state` 外全部可选:后端字段缺失时 UI 显示占位符,而不是整块面板报错。
+ */
+export interface BackendBrowserStatus {
+  state: BackendBrowserState;
+  /** "chromium" / "chrome" / "msedge" */
+  browserType?: string | null;
+  headless?: boolean | null;
+  /** 持久化 Profile 目录,相对后端工作目录 */
+  profileDir?: string | null;
+  /** 本次浏览器启动时间(ISO) */
+  startedAt?: string | null;
+  uptimeMs?: number | null;
+  /** Gemini 登录态;null = 后端未探测 */
+  providerLoggedIn?: boolean | null;
+  /** 正在 PENDING / PROCESSING / CANCELLING 的 Request 数 */
+  activeRequests?: number | null;
+  lastError?: BackendBrowserError | null;
+  /** 后端生成该快照的时间(ISO),用于判断数据新鲜度 */
+  observedAt?: string | null;
+}
+
 export interface BackendRequestBrief {
   id: string;
   status: BackendRequestStatus;
@@ -259,6 +298,19 @@ export function cancelRequest(requestId: string): Promise<BackendRequest> {
 /** GET /api/provider/models(M4);Provider 非就绪时抛 BackendApiError */
 export function listProviderModels(): Promise<BackendModelCatalog> {
   return call<BackendModelCatalog>("/provider/models");
+}
+
+/** GET /api/browser/status:服务端浏览器实例状态快照 */
+export function getBrowserStatus(): Promise<BackendBrowserStatus> {
+  return call<BackendBrowserStatus>("/browser/status");
+}
+
+/**
+ * POST /api/browser/restart:重启服务端浏览器并返回重启后的状态。
+ * 后端可能耗时较长(关旧实例 + 起新实例 + 打开 Gemini 页面)。
+ */
+export function restartBrowser(): Promise<BackendBrowserStatus> {
+  return call<BackendBrowserStatus>("/browser/restart", { method: "POST" });
 }
 
 /** 后端 SSE 帧的 data 负载 */

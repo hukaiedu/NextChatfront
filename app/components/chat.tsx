@@ -57,6 +57,7 @@ import styles from "./chat.module.scss";
 
 import { Modal, showPrompt } from "./ui-lib";
 import { ModelSelectorButton } from "./model-selector";
+import { BrowserStatusButton } from "./browser-status";
 import { useNavigate } from "react-router-dom";
 import { CHAT_PAGE_SIZE, Path, UNFINISHED_INPUT } from "../constant";
 import { Avatar } from "./emoji";
@@ -774,6 +775,7 @@ function _Chat() {
           </div>
           <div className="window-actions">
             <ModelSelectorButton />
+            {!isMobileScreen && <BrowserStatusButton />}
             <div className="window-action-button">
               <IconButton
                 icon={<ReloadIcon />}

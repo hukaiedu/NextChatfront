@@ -124,6 +124,11 @@ const ERROR_TEXT: Record<string, string> = {
   PROVIDER_CONVERSATION_UNAVAILABLE: "Gemini 会话已失效,请新建会话",
   SERVER_RESTARTED_DURING_PROCESSING: "服务重启导致回答中断,请重新发送",
   SERVER_RESTARTED_DURING_CANCELLING: "服务重启时正在停止生成,请重新发送",
+  BROWSER_NOT_RUNNING: "服务端浏览器未运行,请在浏览器状态面板中重启",
+  BROWSER_LAUNCH_FAILED: "服务端浏览器启动失败,请查看后端日志",
+  BROWSER_RESTART_CONFLICT: "有回答正在生成,请先停止生成再重启浏览器",
+  BROWSER_RESTART_FAILED: "服务端浏览器重启失败,请查看后端日志",
+  BROWSER_RESTART_TIMEOUT: "服务端浏览器重启超时,请稍后刷新状态",
   NETWORK_ERROR: "连不上后端服务",
 };
 

@@ -650,6 +650,59 @@ const en: LocaleType = {
       },
     },
   },
+  Browser: {
+    Title: "Backend Browser",
+    SubTitle:
+      "The browser instance personChat Backend drives to reach Gemini Web",
+    State: {
+      RUNNING: "Running",
+      STARTING: "Starting",
+      RESTARTING: "Restarting",
+      STOPPED: "Not running",
+      FAILED: "Failed",
+      UNKNOWN: "Unknown",
+    },
+    Hint: {
+      RUNNING: "Browser is running normally",
+      STARTING: "Starting the browser, please wait",
+      RESTARTING: "Restarting the browser, please wait",
+      STOPPED:
+        "Browser is closed; it starts again on restart or on a new message",
+      FAILED: "Browser is unhealthy; try restarting it or check backend logs",
+      UNKNOWN: "Browser status not fetched yet",
+    },
+    Fields: {
+      StartedAt: "Started at",
+      Uptime: "Uptime",
+      BrowserType: "Browser",
+      Profile: "User profile",
+      LoggedIn: "Gemini sign-in",
+      ActiveRequests: "Answers in progress",
+      LastError: "Last error",
+      RefreshedAt: "Status updated",
+    },
+    LoggedIn: {
+      Yes: "Signed in",
+      No: "Signed out",
+      Unknown: "Unknown",
+    },
+    Headless: {
+      Yes: "Headless",
+      No: "Headed",
+    },
+    Actions: {
+      Refresh: "Refresh",
+      Restart: "Restart browser",
+    },
+    RestartTip: "Restarting interrupts answers in progress",
+    RestartConfirm:
+      "Restarting interrupts answers in progress. Restart the backend browser?",
+    RestartSuccess: "Backend browser restarted",
+    FetchFailed: "Failed to fetch browser status",
+    Unsupported:
+      "This backend version has no browser status API; please upgrade personChat Backend",
+    Empty: "—",
+  },
   Store: {
     DefaultTopic: "New Conversation",
     BotHello: "Hello! How can I assist you today?",

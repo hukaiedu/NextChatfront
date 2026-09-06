@@ -1,0 +1,102 @@
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-running {
+  background-color: #2ecc71;
+}
+
+.dot-busy {
+  background-color: #f1c40f;
+}
+
+.dot-off {
+  background-color: #9aa0a6;
+}
+
+.dot-error {
+  background-color: #e74c3c;
+}
+
+.dot-unknown {
+  background-color: transparent;
+  border: 1px solid var(--bar-color);
+}
+
+.state-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.state-value {
+  max-width: 220px;
+  font-size: 12px;
+  text-align: right;
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background-color: var(--white);
+  border: var(--border-in-light);
+  border-radius: 12px;
+  box-shadow: var(--card-shadow);
+}
+
+.status-popover-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.status-popover-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+}
+
+.status-row-label {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.status-row-value {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}

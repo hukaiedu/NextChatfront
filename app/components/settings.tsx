@@ -44,6 +44,7 @@ import { ErrorBoundary } from "./error";
 import { InputRange } from "./input-range";
 import { useNavigate } from "react-router-dom";
 import { Avatar, AvatarPicker } from "./emoji";
+import { BrowserStatusSection } from "./browser-status";
 import { getClientConfig } from "../config/client";
 import { nanoid } from "nanoid";
 
@@ -315,6 +316,8 @@ export function Settings() {
         </div>
       </div>
       <div className={styles["settings"]}>
+        <BrowserStatusSection />
+
         <List>
           <ListItem title={Locale.Settings.Avatar}>
             <Popover

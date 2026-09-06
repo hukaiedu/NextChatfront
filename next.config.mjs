@@ -31,6 +31,8 @@ const nextConfig = {
     return config;
   },
   output: mode,
+  // 多个 dev server 并存时(如 mock 预览)各自用独立 dist,避免共写 .next 互相损坏
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   images: {
     unoptimized: mode === "export",
   },

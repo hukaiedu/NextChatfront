@@ -72,10 +72,12 @@ app/
 ├─ client/
 │  └─ backend-api.ts        # REST / SSE 后端通信客户端
 ├─ store/
-│  └─ chat.ts               # 前端会话状态与 Backend 数据同步
+│  ├─ chat.ts               # 前端会话状态与 Backend 数据同步
+│  └─ browser.ts            # 浏览器状态快照 + 共享轮询定时器
 ├─ components/
 │  ├─ chat.tsx              # 聊天主界面
 │  ├─ sidebar.tsx           # 会话列表 / 归档切换
+│  ├─ browser-status.tsx    # 状态面板 + 头部状态胶囊(共用一套展示层)
 │  └─ settings.tsx          # 设置页
 └─ api/
    ├─ config/route.ts       # 保留:非敏感 UI 配置
@@ -86,7 +88,9 @@ next.config.mjs             # /backend-api/* rewrite 规则
 
 - `backend-api.ts`:所有后端请求的唯一出口,只和同源 `/backend-api/*` 说话,无 CORS、无 Provider 鉴权头。
 - `chat.ts`:会话状态机(草稿 / 已加载 / 在途 Request / 归档),与 Backend 数据同步。
+- `browser.ts`:浏览器状态快照、重启动作与引用计数的共享轮询(多个展示位只有一份 15s 轮询)。
 - `next.config.mjs`:`/backend-api/*` 同源代理。
+- `docs/browser-status-api.md`:浏览器状态接口的后端实现规格(交后端 Agent 的交付文档)。
 
 > 原 NextChat 的多 Provider 客户端(`app/client/platforms/*`、`app/client/api.ts`)仍在仓库中,但已不参与聊天链路,仅为残留代码。
 
@@ -174,6 +178,7 @@ Conversation、Message、Request 全部来自 personChat Backend:
 - 发送消息:`POST /backend-api/conversations/:id/messages`(带 `Idempotency-Key`)
 - 停止生成:`POST /backend-api/requests/:id/cancel`
 - 事件流:`GET /backend-api/requests/:id/events`(SSE)
+- 浏览器状态:`GET /backend-api/browser/status` / `POST /backend-api/browser/restart`(见「浏览器状态」一节)
 
 Frontend **不再将本地 IndexedDB / localStorage 中的聊天记录视为权威数据**。数据库恢复、刷新恢复都以后端为准。
 
@@ -185,6 +190,7 @@ Frontend **不再将本地 IndexedDB / localStorage 中的聊天记录视为权�
 | Mask(角色预设) | localStorage | `chat-next-web-mask` |
 | Prompt 资源 | localStorage | `chat-next-web-prompt` |
 | 未发送输入 | 内存 | 切换会话时恢复,不落盘 |
+| 浏览器状态快照 | 内存 | 每次进入页面重新拉取,不落盘 |
 | 聊天数据(旧 `chat-next-web-store`) | 不持久化 | 启动时主动清除 |
 
 - Conversation / Message / Request **不作为聊天主数据持久化到本地**。
@@ -219,6 +225,19 @@ POST /backend-api/conversations/:id/messages(得到 Request)
 - **已落库会话**:普通发送 body 只含 `{content}`,**永不携带 `modelKey`**;后端按会话偏好冻结该次 Request 的 `requestedModelKey`。生成中(PENDING / PROCESSING / CANCELLING)选择器禁用。
 - **stale key 安全**:历史偏好键不在当前目录时,按钮显示「当前模型不可用」,**不自动清除偏好**;此时发送会被后端判 `PROVIDER_MODEL_UNAVAILABLE`(Request 终态 FAILED),UI 显示错误气泡,偏好保持不变。
 - **偏好持久化唯一来源是后端**:localStorage 不存任何模型偏好;页面刷新后偏好与会话历史均从 Backend 恢复。
+
+## 浏览器状态(V1.2)
+
+服务端 Playwright 浏览器的运行状态由 personChat Backend 提供,前端只做展示与受控重启:
+
+- **两个展示位共享一份数据**:设置页顶部的「浏览器状态」面板 + 聊天头部(桌面端)状态胶囊,点胶囊展开详情气泡。
+- **数据来源**:`GET /backend-api/browser/status`(快照)与 `POST /backend-api/browser/restart`(重启成功后直接返回新快照)。
+- **轮询**:挂载时立即拉一次,之后每 15s 一次;多个展示位用引用计数共用**一个**定时器,页面隐藏时跳过本轮但不停表,切回前台即恢复新鲜度。
+- **逐字段降级**:除 `state` 外全部可选,后端缺哪个字段该行就显示 `—`;首帧之前显示「未知」。
+- **错误区分**:网络错误按 HTTP 状态分流,`404` 视为「当前后端未提供浏览器状态接口,请升级 personChat Backend」,与「连不上后端服务」分开;拉取失败时保留上一次快照不清空。
+- **重启有确认**:先弹窗确认「重启会中断正在进行的回答」再发请求,失败时按后端错误码出中文提示,并立刻强制回读一次真实状态。
+- **不落本地**:状态与登录态只存在于内存 store,localStorage 不写任何浏览器状态。
+- **后端规格**:`docs/browser-status-api.md`(字段语义、状态机、`BROWSER_*` 错误码、并发约束与验收清单)。
 
 ## SSE 流式
 
@@ -302,6 +321,11 @@ Request 进入 CANCELLING
 | `PROVIDER_RESPONSE_TIMEOUT` | Gemini 回答超时 |
 | `CONVERSATION_REQUEST_IN_PROGRESS` | 同一会话已有回答在进行中 |
 | `SERVER_RESTARTED_DURING_PROCESSING` | 服务重启导致回答中断 |
+| `BROWSER_NOT_RUNNING` | 服务端浏览器未运行,可在浏览器状态面板中重启 |
+| `BROWSER_LAUNCH_FAILED` | 服务端浏览器启动失败,需查看后端日志 |
+| `BROWSER_RESTART_CONFLICT` | 有回答正在生成(或已有重启在途),先停止生成再重启 |
+| `BROWSER_RESTART_FAILED` | 服务端浏览器重启失败,需查看后端日志 |
+| `BROWSER_RESTART_TIMEOUT` | 服务端浏览器重启超时,前端会自动回读一次真实状态 |
 | `NETWORK_ERROR` | 连不上后端服务 |
 | `CANCELLED` | 用户主动取消(正常展示已生成内容,不算错误) |
 
@@ -320,7 +344,7 @@ V1 不再使用 NextChat 原 Provider API。以下路由已统一返回 **404**:
 ## 开发与测试
 
 ```bash
-# 单元测试(CI 模式,当前 35 个测试套件 / 170 个用例全通过)
+# 单元测试(CI 模式,当前 37 个测试套件 / 216 个用例全通过)
 yarn test:ci
 
 # TypeScript 类型检查
@@ -368,6 +392,7 @@ Backend:
 - **Gemini DOM 依赖**:Gemini Web 页面改版会影响 Backend 自动化。
 - **单实例**:Backend 当前为单实例架构。
 - **RATE_LIMITED**:该错误码当前无可靠的真实检测。
+- **浏览器状态待后端接口**:前端已就绪,但 `GET /api/browser/status` / `POST /api/browser/restart` 尚未实现,面板在此期间只显示升级提示(规格见 `docs/browser-status-api.md`)。
 
 ## 安全说明
 
