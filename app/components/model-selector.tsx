@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
 
 import DownIcon from "../icons/down.svg";
+import GeminiIcon from "../icons/llm-icons/gemini.svg";
 import Locale from "../locales";
 import { useChatStore } from "../store";
 import { IconButton } from "./button";
-import { Selector } from "./ui-lib";
+import styles from "./model-selector.module.scss";
 
 const RETRY_VALUE = "__retry_load_models__";
 const DEFAULT_VALUE = "";
 
 /**
- * M4:聊天头部的模型选择器。
+ * M4:聊天头部的模型选择器(紧凑下拉框)。
  *
  * - 会话模型偏好存在后端 Conversation.preferredModelKey,这里只读显示 + PATCH 保存
  * - null = 默认模型(默认选项,选中后 PATCH null 清除偏好,绝不伪造"默认"键)
@@ -84,8 +85,9 @@ export function ModelSelectorButton() {
           })),
         ];
 
-  const handleSelection = (selection: string[]) => {
-    const value = selection[0];
+  const currentValue = preferred ?? DEFAULT_VALUE;
+
+  const handleSelection = (value: string) => {
     if (value === RETRY_VALUE) {
       void chatStore.loadModels(true);
       return;
@@ -97,7 +99,7 @@ export function ModelSelectorButton() {
   };
 
   return (
-    <>
+    <div className={styles["anchor"]}>
       <div className="window-action-button">
         <IconButton
           icon={<DownIcon />}
@@ -112,13 +114,42 @@ export function ModelSelectorButton() {
         />
       </div>
       {pickerOpen && (
-        <Selector
-          items={items}
-          defaultSelectedValue={preferred ?? DEFAULT_VALUE}
-          onSelection={handleSelection}
-          onClose={() => setPickerOpen(false)}
-        />
+        <>
+          <div
+            className={styles["mask"]}
+            onClick={() => setPickerOpen(false)}
+          />
+          <div className={styles["menu"]} role="menu">
+            {items.map((item, i) => (
+              <button
+                key={i}
+                type="button"
+                role="menuitem"
+                className={`${styles["item"]}${
+                  item.disable ? ` ${styles["item-disabled"]}` : ""
+                }`}
+                disabled={item.disable}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (item.disable) {
+                    return;
+                  }
+                  if (item.value !== RETRY_VALUE) {
+                    setPickerOpen(false);
+                  }
+                  handleSelection(item.value);
+                }}
+              >
+                <GeminiIcon width={20} height={20} />
+                <span className={styles["item-title"]}>{item.title}</span>
+                {item.value === currentValue ? (
+                  <span className={styles["item-check"]} />
+                ) : null}
+              </button>
+            ))}
+          </div>
+        </>
       )}
-    </>
+    </div>
   );
 }
