@@ -34,6 +34,13 @@ const cn = {
   },
   Chat: {
     SubTitle: (count: number) => `共 ${count} 条对话`,
+    ModelSelector: {
+      Default: "默认模型",
+      Unavailable: "当前模型不可用",
+      LoadFailed: "模型列表加载失败,点击重试",
+      BusyTip: "回答进行中,暂不能切换模型",
+      SavingTip: "正在保存模型偏好…",
+    },
     EditMessage: {
       Title: "编辑消息记录",
       Topic: {

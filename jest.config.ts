@@ -14,6 +14,9 @@ const config: Config = {
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/$1",
+    // @svgr/webpack 只在 next build 里生效;测试里 svg 导入给个空组件
+    // (键名必须与 next/jest 默认规则一致才能覆盖其 fileMock)
+    "^.+\\.(svg)$": "<rootDir>/test/svg-mock.tsx",
   },
   extensionsToTreatAsEsm: [".ts", ".tsx"],
   injectGlobals: true,

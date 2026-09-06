@@ -31,9 +31,25 @@ export interface BackendConversation {
   status: ConversationStatus | "DELETED";
   provider: string;
   providerConversationUrl: string | null;
+  /** M4:会话维度的模型偏好;null = 未指定(默认模型) */
+  preferredModelKey: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+}
+
+/** M4:GET /api/provider/models 返回的目录项(字段与后端 GeminiModelOption 对应) */
+export interface BackendModelOption {
+  key: string;
+  label: string;
+  /** 页面当前选中的模型(页面状态,与会话偏好无关) */
+  selected: boolean;
+  disabled: boolean;
+}
+
+export interface BackendModelCatalog {
+  models: BackendModelOption[];
+  currentModelKey: string | null;
 }
 
 export interface BackendRequestBrief {
@@ -186,7 +202,12 @@ export function getConversation(id: string): Promise<BackendConversation> {
 
 export function patchConversation(
   id: string,
-  patch: { title?: string; status?: ConversationStatus },
+  patch: {
+    title?: string;
+    status?: ConversationStatus;
+    /** M4:显式 null = 清除偏好;undefined = 不动偏好(与后端 PATCH 语义一致) */
+    preferredModelKey?: string | null;
+  },
 ): Promise<BackendConversation> {
   return call<BackendConversation>(`/conversations/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -212,12 +233,16 @@ export function sendMessage(
   conversationId: string,
   content: string,
   idempotencyKey: string,
+  modelKey?: string,
 ): Promise<SendMessageResult> {
   return call<SendMessageResult>(
     `/conversations/${encodeURIComponent(conversationId)}/messages`,
     {
       method: "POST",
-      body: { content },
+      body: {
+        content,
+        ...(modelKey !== undefined ? { modelKey } : {}),
+      },
       headers: { "Idempotency-Key": idempotencyKey },
     },
   );
@@ -229,6 +254,11 @@ export function cancelRequest(requestId: string): Promise<BackendRequest> {
     `/requests/${encodeURIComponent(requestId)}/cancel`,
     { method: "POST" },
   );
+}
+
+/** GET /api/provider/models(M4);Provider 非就绪时抛 BackendApiError */
+export function listProviderModels(): Promise<BackendModelCatalog> {
+  return call<BackendModelCatalog>("/provider/models");
 }
 
 /** 后端 SSE 帧的 data 负载 */

@@ -11,6 +11,7 @@ import { createEmptyMask, Mask } from "./mask";
 import {
   BackendApiError,
   BackendMessage,
+  BackendModelOption,
   ConversationStatus,
   RequestEventSubscription,
   RequestStatusFrame,
@@ -20,6 +21,7 @@ import {
   isRequestFinished,
   listConversations,
   listMessages,
+  listProviderModels,
   newIdempotencyKey,
   patchConversation,
   sendMessage,
@@ -95,6 +97,8 @@ export interface ChatSession {
   pendingRequestId?: string;
   /** 正在等待后端确认停止(CANCELLING 期间按钮 disabled) */
   cancelling?: boolean;
+  /** M4:会话模型偏好(null = 默认模型);后端 Conversation 是唯一持久化来源 */
+  preferredModelKey?: string | null;
 }
 
 export const DEFAULT_TOPIC = Locale.Store.DefaultTopic;
@@ -180,6 +184,9 @@ const PLACEHOLDER_SESSION = createDraftSession();
 /** 每条会话最多一个在途 SSE 订阅(后端本身就禁止同会话并发 Request) */
 const subscriptions = new Map<string, RequestEventSubscription>();
 
+/** M4-FIX-02:每个会话最多一个在途的模型偏好 PATCH,防止快速连点导致乱序写入 */
+const modelSavingSessionIds = new Set<string>();
+
 function closeSubscription(conversationId: string) {
   subscriptions.get(conversationId)?.close();
   subscriptions.delete(conversationId);
@@ -255,6 +262,7 @@ function toChatSession(conversation: {
   title: string;
   status: string;
   updatedAt: string;
+  preferredModelKey?: string | null;
 }): ChatSession {
   return {
     id: conversation.id,
@@ -267,6 +275,7 @@ function toChatSession(conversation: {
     loaded: false,
     conversationStatus:
       conversation.status === "ARCHIVED" ? "ARCHIVED" : "ACTIVE",
+    preferredModelKey: conversation.preferredModelKey ?? null,
   };
 }
 
@@ -279,6 +288,9 @@ interface ChatState {
   loadingList: boolean;
   /** 当前列表展示 ACTIVE 还是 ARCHIVED */
   listStatus: ConversationStatus;
+  /** M4:Provider 模型目录(全局共享,与会话无关)与加载状态 */
+  modelCatalog: BackendModelOption[];
+  modelCatalogStatus: "idle" | "loading" | "ready" | "error";
 }
 
 interface ChatActions {
@@ -308,6 +320,16 @@ interface ChatActions {
     messageId: string,
   ): void;
   cancelRequest(conversationId: string): Promise<void>;
+  /** M4:拉模型目录;已 ready 且非 force 时不重复请求 */
+  loadModels(force?: boolean): Promise<void>;
+  /**
+   * M4:设置会话模型偏好(key 为 null = 默认模型)。
+   * 草稿选非 null → ensureConversation → PATCH;草稿选 null → no-op。
+   * 乐观更新,失败回滚到原值;在途 Request / 同会话正在保存时拒绝(FIX-02)。
+   */
+  setSessionModel(sessionId: string, key: string | null): Promise<void>;
+  /** M4-FIX-02:指定会话是否正在保存模型偏好 */
+  isModelSaving(sessionId: string): boolean;
   clearAllData(): Promise<void>;
 }
 
@@ -320,6 +342,8 @@ const DEFAULT_CHAT_STATE: ChatState = {
   ready: false,
   loadingList: false,
   listStatus: "ACTIVE",
+  modelCatalog: [],
+  modelCatalogStatus: "idle",
 };
 
 export const useChatStore = create<ChatStore>()((set, get) => {
@@ -367,6 +391,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         draft: false,
         loaded: true,
         lastUpdate: new Date(created.updatedAt).getTime(),
+        preferredModelKey: created.preferredModelKey ?? null,
       };
       if (index < 0) {
         return {
@@ -711,6 +736,12 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         return;
       }
 
+      // FIX-05:ensureConversation 会替换 draft,提前捕获偏好
+      const wasDraft = session.draft;
+      const draftModelKey = wasDraft
+        ? session.preferredModelKey ?? undefined
+        : undefined;
+
       const conversationId = await ensureConversation(session, text).catch(
         (error) => {
           notifyError(error);
@@ -730,6 +761,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           conversationId,
           text,
           newIdempotencyKey(),
+          draftModelKey,
         );
         const userMessage = toChatMessage(result.userMessage);
         const assistantMessage = toChatMessage(result.assistantMessage);
@@ -746,6 +778,9 @@ export const useChatStore = create<ChatStore>()((set, get) => {
             ]);
             target.lastUpdate = Date.now();
             target.pendingRequestId = result.request.id;
+            if (draftModelKey !== undefined) {
+              target.preferredModelKey = draftModelKey;
+            }
           },
         );
 
@@ -854,6 +889,77 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         }
         notifyError(error);
       }
+    },
+
+    async loadModels(force?: boolean) {
+      const { modelCatalogStatus } = get();
+      if (modelCatalogStatus === "loading") return;
+      if (modelCatalogStatus === "ready" && !force) return;
+      set({ modelCatalogStatus: "loading" });
+      try {
+        const catalog = await listProviderModels();
+        set({ modelCatalog: catalog.models, modelCatalogStatus: "ready" });
+      } catch (error) {
+        console.error("[Chat] 模型目录加载失败", error);
+        // FIX-07:PROVIDER_NOT_READY(Scheduler 持锁)重置为 idle 允许重试,其他错误仍为 error
+        if (
+          error instanceof BackendApiError &&
+          error.code === "PROVIDER_NOT_READY"
+        ) {
+          set({ modelCatalogStatus: "idle" });
+        } else {
+          set({ modelCatalogStatus: "error" });
+        }
+      }
+    },
+
+    async setSessionModel(sessionId, key) {
+      const session = get().sessions.find((s) => s.id === sessionId);
+      if (!session || session.pendingRequestId) return;
+      if (modelSavingSessionIds.has(sessionId)) return;
+      const previous = session.preferredModelKey ?? null;
+      if (previous === key) return;
+
+      // FIX-05:Draft 仅本地更新,首次发送时才建 Conversation
+      if (session.draft) {
+        get().updateTargetSession(
+          { id: sessionId } as ChatSession,
+          (target) => {
+            target.preferredModelKey = key;
+          },
+        );
+        return;
+      }
+
+      modelSavingSessionIds.add(sessionId);
+      get().updateTargetSession({ id: sessionId } as ChatSession, (target) => {
+        target.preferredModelKey = key;
+      });
+      try {
+        const updated = await patchConversation(sessionId, {
+          preferredModelKey: key,
+        });
+        get().updateTargetSession(
+          { id: sessionId } as ChatSession,
+          (target) => {
+            target.preferredModelKey = updated.preferredModelKey ?? null;
+          },
+        );
+      } catch (error) {
+        notifyError(error);
+        get().updateTargetSession(
+          { id: sessionId } as ChatSession,
+          (target) => {
+            target.preferredModelKey = previous;
+          },
+        );
+      } finally {
+        modelSavingSessionIds.delete(sessionId);
+      }
+    },
+
+    isModelSaving(sessionId) {
+      return modelSavingSessionIds.has(sessionId);
     },
 
     async clearAllData() {

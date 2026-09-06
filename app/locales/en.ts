@@ -35,6 +35,13 @@ const en: LocaleType = {
   },
   Chat: {
     SubTitle: (count: number) => `${count} messages`,
+    ModelSelector: {
+      Default: "Default model",
+      Unavailable: "Current model unavailable",
+      LoadFailed: "Failed to load model list, click to retry",
+      BusyTip: "Cannot switch model while a reply is in progress",
+      SavingTip: "Saving model preference…",
+    },
     EditMessage: {
       Title: "Edit All Messages",
       Topic: {

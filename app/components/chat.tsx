@@ -56,6 +56,7 @@ import { IconButton } from "./button";
 import styles from "./chat.module.scss";
 
 import { Modal, showPrompt } from "./ui-lib";
+import { ModelSelectorButton } from "./model-selector";
 import { useNavigate } from "react-router-dom";
 import { CHAT_PAGE_SIZE, Path, UNFINISHED_INPUT } from "../constant";
 import { Avatar } from "./emoji";
@@ -772,6 +773,7 @@ function _Chat() {
             </div>
           </div>
           <div className="window-actions">
+            <ModelSelectorButton />
             <div className="window-action-button">
               <IconButton
                 icon={<ReloadIcon />}

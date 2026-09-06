@@ -37,6 +37,7 @@ function conversation(
     status,
     provider: "gemini",
     providerConversationUrl: null,
+    preferredModelKey: null,
     createdAt: STAMP,
     updatedAt: STAMP,
     deletedAt: status === "DELETED" ? STAMP : null,
