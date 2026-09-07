@@ -29,6 +29,15 @@ const en: LocaleType = {
     SaasTips: "Too Complex, Use Immediately Now",
     TopTips:
       "🥳 NextChat AI launch promotion: Instantly unlock the latest models like OpenAI o1, GPT-4o, Claude-3.5!",
+    ServerTitle: "personChat",
+    PasswordPlaceholder: "Enter access password",
+    Submit: "Sign in",
+    Error: {
+      AUTH_INVALID_CREDENTIALS: "Incorrect password, please try again",
+      AUTH_RATE_LIMITED: (seconds: number) =>
+        `Too many failed attempts, retry in ${seconds}s`,
+      NETWORK_ERROR: "Network error, please try again later",
+    },
   },
   ChatItem: {
     ChatItemCount: (count: number) => `${count} messages`,

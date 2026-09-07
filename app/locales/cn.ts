@@ -28,6 +28,15 @@ const cn = {
     SaasTips: "配置太麻烦，想要立即使用",
     TopTips:
       "🥳 NextChat AI 首发优惠，立刻解锁 OpenAI o1, GPT-4o, Claude-3.5 等最新大模型",
+    ServerTitle: "personChat",
+    PasswordPlaceholder: "请输入访问密码",
+    Submit: "登录",
+    Error: {
+      AUTH_INVALID_CREDENTIALS: "密码不正确，请重试",
+      AUTH_RATE_LIMITED: (seconds: number) =>
+        `失败次数过多，请 ${seconds} 秒后重试`,
+      NETWORK_ERROR: "网络异常，请稍后重试",
+    },
   },
   ChatItem: {
     ChatItemCount: (count: number) => `${count} 条对话`,

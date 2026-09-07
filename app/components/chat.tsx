@@ -31,7 +31,7 @@ import ArchiveIcon from "../icons/archive.svg";
 import {
   ChatMessage,
   createMessage,
-  DEFAULT_TOPIC,
+  getDefaultTopic,
   errorTextForCode,
   SubmitKey,
   Theme,
@@ -767,7 +767,7 @@ function _Chat() {
               )}
               onClickCapture={renameCurrentSession}
             >
-              {!session.topic ? DEFAULT_TOPIC : session.topic}
+              {!session.topic ? getDefaultTopic() : session.topic}
             </div>
             <div className="window-header-sub-title">
               {Locale.Chat.SubTitle(session.messages.length)}

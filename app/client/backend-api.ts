@@ -136,9 +136,32 @@ export class BackendApiError extends Error {
     readonly code: string,
     message: string,
     readonly status: number,
+    /** 429 限流响应 Retry-After 头的秒数;其余场景 undefined */
+    readonly retryAfterSeconds?: number,
   ) {
     super(message);
     this.name = "BackendApiError";
+  }
+}
+
+/**
+ * 全局 401 回调(SEC-1 §11.2):业务 API 收到 AUTH_REQUIRED 时触发。
+ * 由 auth store 经 setUnauthorizedHandler 注册,避免 store ↔ client 循环依赖。
+ */
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+/** 仅业务 API 的 401 触发全局登出;auth 端点自身(如登录密码错)不触发(§11.2) */
+function notifyUnauthorizedIfNeeded(
+  path: string,
+  status: number,
+  code: string | undefined,
+): void {
+  if (status === 401 && code === "AUTH_REQUIRED" && !path.startsWith("/auth")) {
+    unauthorizedHandler?.();
   }
 }
 
@@ -191,10 +214,14 @@ async function call<T>(
     const error = (
       payload as { error?: { code?: string; message?: string } } | null
     )?.error;
+    notifyUnauthorizedIfNeeded(path, response.status, error?.code);
     throw new BackendApiError(
       error?.code ?? "NETWORK_ERROR",
       error?.message ?? `Request failed with status ${response.status}`,
       response.status,
+      response.status === 429
+        ? Number(response.headers?.get?.("Retry-After")) || undefined
+        : undefined,
     );
   }
 
@@ -213,6 +240,7 @@ export async function listConversations(
     const error = (
       payload as { error?: { code?: string; message?: string } } | null
     )?.error;
+    notifyUnauthorizedIfNeeded("/conversations", response.status, error?.code);
     throw new BackendApiError(
       error?.code ?? "NETWORK_ERROR",
       error?.message ?? `Request failed with status ${response.status}`,
@@ -313,6 +341,31 @@ export function restartBrowser(): Promise<BackendBrowserStatus> {
   return call<BackendBrowserStatus>("/browser/restart", { method: "POST" });
 }
 
+/** GET /api/auth/session 的负载(§四);disabled 模式恒 authenticated:true */
+export interface AuthSessionInfo {
+  authenticated: boolean;
+  /** Session 过期时间(ISO);未认证或 disabled 模式为 null */
+  expiresAt: string | null;
+}
+
+/** GET /api/auth/session:永不 401,启动探测与 SSE 重连探测共用 */
+export function getAuthSession(): Promise<AuthSessionInfo> {
+  return call<AuthSessionInfo>("/auth/session");
+}
+
+/** POST /api/auth/login:密码错 → 401,限流 → 429(信封 code + retryAfterSeconds) */
+export function login(password: string): Promise<AuthSessionInfo> {
+  return call<AuthSessionInfo>("/auth/login", {
+    method: "POST",
+    body: { password },
+  });
+}
+
+/** POST /api/auth/logout:幂等 204,清 Session Cookie */
+export function logout(): Promise<void> {
+  return call<void>("/auth/logout", { method: "POST" });
+}
+
 /** 后端 SSE 帧的 data 负载 */
 export interface RequestStatusFrame {
   requestId: string;
@@ -341,6 +394,21 @@ export interface RequestEventSubscription {
 }
 
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
+
+/**
+ * §8.3:transport error 后的 session probe。多个 SSE 同时断开时共享同一次探测
+ * (in-flight 合并);探测自身网络失败返回 null(第三态:不修改认证状态)。
+ */
+let authProbeInFlight: Promise<AuthSessionInfo | null> | null = null;
+
+function probeAuthSession(): Promise<AuthSessionInfo | null> {
+  authProbeInFlight ??= getAuthSession()
+    .catch(() => null)
+    .finally(() => {
+      authProbeInFlight = null;
+    });
+  return authProbeInFlight;
+}
 
 /**
  * 订阅一条 Request 的回答流。
@@ -453,10 +521,22 @@ export function subscribeRequestEvents(
         finish({ status: "FAILED", requestStatus: "FAILED" });
         return;
       }
-      if (source?.readyState === EventSource.CLOSED) {
-        // 服务端已结束响应(多为终态后主动 close):重连一次读最终状态即可自愈
-        scheduleReconnect();
-      }
+      // 传输层错误(含 401 拒绝——EventSource 不暴露状态码,§8.2/§8.3):
+      // 先探测 session,三态——失效则停连并全局登出;有效或探测失败则维持既有重连。
+      void probeAuthSession().then((session) => {
+        if (closedByClient || finished) return;
+        if (session && !session.authenticated) {
+          closedByClient = true;
+          if (retryTimer) clearTimeout(retryTimer);
+          closeSource();
+          unauthorizedHandler?.();
+          return;
+        }
+        if (source?.readyState === EventSource.CLOSED) {
+          // 服务端已结束响应(多为终态后主动 close):重连一次读最终状态即可自愈
+          scheduleReconnect();
+        }
+      });
     });
   }
 

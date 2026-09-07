@@ -13,7 +13,6 @@ import {
   BackendMessage,
   BackendModelOption,
   ConversationStatus,
-  RequestEventSubscription,
   RequestStatusFrame,
   cancelRequest as cancelBackendRequest,
   createConversation,
@@ -27,6 +26,12 @@ import {
   sendMessage,
   subscribeRequestEvents,
 } from "../client/backend-api";
+import {
+  closeAllStreams,
+  closeStream,
+  forgetStream,
+  trackStream,
+} from "./active-streams";
 
 const localStorage = safeLocalStorage();
 
@@ -101,11 +106,23 @@ export interface ChatSession {
   preferredModelKey?: string | null;
 }
 
-export const DEFAULT_TOPIC = Locale.Store.DefaultTopic;
-export const BOT_HELLO: ChatMessage = createMessage({
-  role: "assistant",
-  content: Locale.Store.BotHello,
-});
+let _defaultTopic: string | undefined;
+let _botHello: ChatMessage | undefined;
+
+/**
+ * locales↔chat 循环若以 locales 为入口(如 prerender 包实测),模块求值期读
+ * Locale 会 TDZ;改为调用期求值,任何模块求值顺序下都安全。
+ */
+export function getDefaultTopic(): string {
+  return (_defaultTopic ??= Locale.Store.DefaultTopic);
+}
+
+export function getBotHello(): ChatMessage {
+  return (_botHello ??= createMessage({
+    role: "assistant",
+    content: Locale.Store.BotHello,
+  }));
+}
 
 /** 后端错误码 → 中文提示;未列出的直接展示后端 message */
 const ERROR_TEXT: Record<string, string> = {
@@ -168,7 +185,7 @@ function emptyStat(): ChatStat {
 export function createDraftSession(): ChatSession {
   return {
     id: `draft-${nanoid()}`,
-    topic: DEFAULT_TOPIC,
+    topic: getDefaultTopic(),
     messages: [],
     stat: emptyStat(),
     lastUpdate: Date.now(),
@@ -184,18 +201,14 @@ export function createDraftSession(): ChatSession {
  * 它不在 sessions 数组里,所以 updateTargetSession 会按 id 找不到而空转,
  * 不会把数据写进一个不存在的会话。
  */
-const PLACEHOLDER_SESSION = createDraftSession();
-
-/** 每条会话最多一个在途 SSE 订阅(后端本身就禁止同会话并发 Request) */
-const subscriptions = new Map<string, RequestEventSubscription>();
+let _placeholderSession: ChatSession | undefined;
+/** 惰性占位会话:与 getDefaultTopic 同理,避免模块求值期经 createDraftSession 触达 Locale */
+function getPlaceholderSession(): ChatSession {
+  return (_placeholderSession ??= createDraftSession());
+}
 
 /** M4-FIX-02:每个会话最多一个在途的模型偏好 PATCH,防止快速连点导致乱序写入 */
 const modelSavingSessionIds = new Set<string>();
-
-function closeSubscription(conversationId: string) {
-  subscriptions.get(conversationId)?.close();
-  subscriptions.delete(conversationId);
-}
 
 /** 后端 role 是大写枚举,NextChat 用小写 */
 function toChatRole(role: BackendMessage["role"]): MessageRole {
@@ -386,7 +399,9 @@ export const useChatStore = create<ChatStore>()((set, get) => {
   ): Promise<string> {
     if (!session.draft) return session.id;
 
-    const created = await createConversation(trimTopic(text) || DEFAULT_TOPIC);
+    const created = await createConversation(
+      trimTopic(text) || getDefaultTopic(),
+    );
     set((state) => {
       const index = state.sessions.findIndex((s) => s.id === session.id);
       const replaced: ChatSession = {
@@ -474,8 +489,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
     /** 会话列表在 ACTIVE / ARCHIVED 之间切换(§七) */
     async switchListStatus(status: ConversationStatus) {
       if (get().listStatus === status && get().ready) return;
-      subscriptions.forEach((subscription) => subscription.close());
-      subscriptions.clear();
+      closeAllStreams();
       set({
         listStatus: status,
         sessions: [],
@@ -608,7 +622,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       if (!session) return;
 
       if (!session.draft) {
-        closeSubscription(session.id);
+        closeStream(session.id);
         try {
           await deleteConversation(session.id);
         } catch (error) {
@@ -641,7 +655,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         notifyError(error);
         return;
       }
-      closeSubscription(session.id);
+      closeStream(session.id);
       set((state) => {
         const sessions = state.sessions.filter((s) => s.id !== session.id);
         if (!sessions.length) sessions.push(createDraftSession());
@@ -685,7 +699,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
 
     currentSession() {
       const { sessions, currentSessionIndex } = get();
-      if (!sessions.length) return PLACEHOLDER_SESSION;
+      if (!sessions.length) return getPlaceholderSession();
       if (currentSessionIndex < 0 || currentSessionIndex >= sessions.length) {
         const index = Math.min(
           sessions.length - 1,
@@ -732,7 +746,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       }
 
       let session = get().currentSession();
-      if (session === PLACEHOLDER_SESSION) {
+      if (session === getPlaceholderSession()) {
         get().newSession();
         session = get().currentSession();
       }
@@ -819,7 +833,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
 
     /** 订阅(或重新订阅)一条 Request 的回答流 */
     followRequest(conversationId, requestId, messageId) {
-      closeSubscription(conversationId);
+      closeStream(conversationId);
       const subscription = subscribeRequestEvents(requestId, {
         onContent(text) {
           patchMessage(conversationId, messageId, (message) => {
@@ -841,7 +855,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           });
         },
         onFinish(final) {
-          subscriptions.delete(conversationId);
+          forgetStream(conversationId);
           patchMessage(conversationId, messageId, (message) => {
             message.streaming = false;
             if (
@@ -876,7 +890,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           void get().reloadList();
         },
       });
-      subscriptions.set(conversationId, subscription);
+      trackStream(conversationId, subscription);
     },
 
     async cancelRequest(conversationId) {
@@ -968,7 +982,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
     },
 
     async clearAllData() {
-      subscriptions.forEach((_, id) => closeSubscription(id));
+      closeAllStreams();
       await indexedDBStorage.clear();
       localStorage.clear();
       location.reload();
