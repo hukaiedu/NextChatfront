@@ -179,6 +179,10 @@ const en: LocaleType = {
     Revert: "Revert",
     ShowArchived: "Show archived chats",
     ShowActive: "Show active chats",
+    LoadMore: "Loading…",
+    LoadMoreError: "Failed to load more",
+    ReloadError: "Failed to refresh list",
+    Retry: "Retry",
   },
   Settings: {
     Title: "Settings",

@@ -177,6 +177,10 @@ const cn = {
     Revert: "撤销",
     ShowArchived: "查看已归档会话",
     ShowActive: "查看进行中会话",
+    LoadMore: "加载中…",
+    LoadMoreError: "加载更多失败",
+    ReloadError: "列表刷新失败",
+    Retry: "重试",
   },
   Settings: {
     Title: "设置",

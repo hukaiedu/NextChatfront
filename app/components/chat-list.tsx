@@ -15,7 +15,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { Path } from "../constant";
 import { MaskAvatar } from "./mask";
 import { Mask } from "../store/mask";
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 import { showConfirm } from "./ui-lib";
 import { useMobileScreen } from "../utils";
 import clsx from "clsx";
@@ -103,6 +104,13 @@ export function ChatItem(props: {
   );
 }
 
+const paginationStatusStyle: CSSProperties = {
+  padding: "8px 14px",
+  fontSize: "12px",
+  opacity: 0.6,
+  textAlign: "center",
+};
+
 export function ChatList(props: { narrow?: boolean }) {
   const [sessions, selectedIndex, selectSession, moveSession] = useChatStore(
     (state) => [
@@ -116,7 +124,61 @@ export function ChatList(props: { narrow?: boolean }) {
   const navigate = useNavigate();
   const isMobileScreen = useMobileScreen();
 
+  // PAG-1:无限滚动与 DnD 互斥 —— 拖动周期不得改变 Draggable 集合
+  const [isDragging, setIsDragging] = useState(false);
+  // IO 回调要读最新值,拖拽状态用 ref 镜像
+  const isDraggingRef = useRef(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const {
+    listNextCursor,
+    loadingList,
+    loadingMoreList,
+    listReloadError,
+    listMoreError,
+  } = chatStore;
+
+  const setDragging = (dragging: boolean) => {
+    isDraggingRef.current = dragging;
+    setIsDragging(dragging);
+  };
+
+  const hasMore = listNextCursor !== null;
+
+  // PAG-1:IntersectionObserver(root = sidebar-body 滚动容器,底部 300px 预载);
+  // 六条件闸门在回调里读最新 store 状态,cursor=null 由 store 守卫兜底
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasMore) return;
+    const scrollRoot = sentinel.closest(`.${styles["sidebar-body"]}`) ?? null;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        const state = useChatStore.getState();
+        if (
+          state.listNextCursor === null ||
+          state.loadingList ||
+          state.loadingMoreList ||
+          state.listReloadError ||
+          state.listMoreError ||
+          isDraggingRef.current
+        ) {
+          return;
+        }
+        void state.loadMoreConversations();
+      },
+      { root: scrollRoot, rootMargin: "0px 0px 300px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMore]);
+
+  const onDragStart = () => setDragging(true);
+
   const onDragEnd: OnDragEndResponder = (result) => {
+    // PAG-REVIEW-14:必须先解除拖拽再 early return —— 否则取消拖拽 / 原位
+    // 放下后 isDragging 永久 true,Infinite Scroll 从此关闭
+    setDragging(false);
     const { destination, source } = result;
     if (!destination) {
       return;
@@ -133,7 +195,7 @@ export function ChatList(props: { narrow?: boolean }) {
   };
 
   return (
-    <DragDropContext onDragEnd={onDragEnd}>
+    <DragDropContext onDragStart={onDragStart} onDragEnd={onDragEnd}>
       <Droppable droppableId="chat-list">
         {(provided) => (
           <div
@@ -167,6 +229,47 @@ export function ChatList(props: { narrow?: boolean }) {
               />
             ))}
             {provided.placeholder}
+            {listReloadError ? (
+              <div
+                data-pagination-status="reload-error"
+                style={paginationStatusStyle}
+              >
+                <span>{Locale.Home.ReloadError}</span>
+                <button
+                  data-pagination-retry="reload"
+                  onClick={() => void chatStore.reloadList()}
+                >
+                  {Locale.Home.Retry}
+                </button>
+              </div>
+            ) : listMoreError ? (
+              <div
+                data-pagination-status="more-error"
+                style={paginationStatusStyle}
+              >
+                <span>{Locale.Home.LoadMoreError}</span>
+                <button
+                  data-pagination-retry="more"
+                  onClick={() => void chatStore.loadMoreConversations()}
+                >
+                  {Locale.Home.Retry}
+                </button>
+              </div>
+            ) : loadingMoreList ? (
+              <div
+                data-pagination-status="loading-more"
+                style={paginationStatusStyle}
+              >
+                {Locale.Home.LoadMore}
+              </div>
+            ) : null}
+            {hasMore && !listReloadError && (
+              <div
+                ref={sentinelRef}
+                data-pagination-sentinel="true"
+                style={{ height: 1 }}
+              />
+            )}
           </div>
         )}
       </Droppable>

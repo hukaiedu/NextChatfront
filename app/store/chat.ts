@@ -306,6 +306,14 @@ interface ChatState {
   loadingList: boolean;
   /** 当前列表展示 ACTIVE 还是 ARCHIVED */
   listStatus: ConversationStatus;
+  /** PAG-1:下一页游标;null = 无更多(与后端 nextCursor 语义一致) */
+  listNextCursor: string | null;
+  /** PAG-1:加载更多 inflight */
+  loadingMoreList: boolean;
+  /** PAG-1:第一页/权威列表刷新失败(重试入口 = reloadList) */
+  listReloadError: boolean;
+  /** PAG-1:加载更多失败(重试入口 = loadMoreConversations) */
+  listMoreError: boolean;
   /** M4:Provider 模型目录(全局共享,与会话无关)与加载状态 */
   modelCatalog: BackendModelOption[];
   modelCatalogStatus: "idle" | "loading" | "ready" | "error";
@@ -314,6 +322,8 @@ interface ChatState {
 interface ChatActions {
   bootstrap(): Promise<void>;
   reloadList(): Promise<void>;
+  /** PAG-1:加载下一页(追加型) */
+  loadMoreConversations(): Promise<void>;
   switchListStatus(status: ConversationStatus): Promise<void>;
   loadSessionMessages(sessionId: string): Promise<void>;
   refreshSessionMessages(sessionId: string): Promise<void>;
@@ -360,11 +370,27 @@ const DEFAULT_CHAT_STATE: ChatState = {
   ready: false,
   loadingList: false,
   listStatus: "ACTIVE",
+  listNextCursor: null,
+  loadingMoreList: false,
+  listReloadError: false,
+  listMoreError: false,
   modelCatalog: [],
   modelCatalogStatus: "idle",
 };
 
 export const useChatStore = create<ChatStore>()((set, get) => {
+  // PAG-1 分页并发模型(闭包,非 zustand state,避免多余渲染订阅)
+  /** authoritative invalidation epoch(列表真相版本,PAG-REVIEW-12):每次权威
+   * 失效事件到达时立即递增 —— reloadList 入口第一条语句、先于 same-status
+   * 判断,即使该调用将被折叠为 trailing 也不例外 */
+  let listGeneration = 0;
+  /** 第一页 inflight 登记:同 status 单飞、跨 status 让路(PAG-REVIEW-01) */
+  let initialLoad: { status: ConversationStatus; generation: number } | null =
+    null;
+  /** trailing reload 登记(PAG-REVIEW-09):同 status reload 在途期间到达的
+   * 后续权威刷新折叠为最多 1 次 trailing,由 ownsInitialSlot 的请求收尾消费 */
+  let pendingReloadStatus: ConversationStatus | null = null;
+
   /** 按 id 改某条消息:订阅回调可能在会话切换 / 删除之后才到达 */
   function patchMessage(
     sessionId: string,
@@ -441,48 +467,136 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       await get().reloadList();
     },
 
-    /** 重新拉列表:发送 / 完成 / 改名之后顺序与标题会跟着变 */
+    /** 重新拉列表(权威):入口即权威失效 —— 立即递增 epoch 并废弃旧分页进度 */
     async reloadList() {
-      if (get().loadingList) return;
-      set({ loadingList: true });
       const status = get().listStatus;
+      // PAG-REVIEW-12:入口第一件事 —— 权威失效 epoch 立即递增。
+      // 必须在 same-status 判断之前:即使本次刷新将被折叠为 trailing,
+      // 旧快照也从这一刻起失效。
+      const requestedGeneration = ++listGeneration;
+      // PAG-REVIEW-13:权威失效到达那一刻立即废弃旧分页进度(不等新请求成功)
+      set({
+        listNextCursor: null,
+        loadingMoreList: false,
+        listMoreError: false,
+      });
+
+      if (initialLoad?.status === status) {
+        // 同 status 单飞:折叠为 trailing,不丢弃(PAG-REVIEW-09);
+        // generation 已在上方递增 → 旧 initial 响应已立即 stale(PAG-REVIEW-12)
+        pendingReloadStatus = status;
+        return;
+      }
+
+      initialLoad = { status, generation: requestedGeneration };
+      set({ loadingList: true, listReloadError: false });
+
+      // 双守卫(PAG-REVIEW-12,独立判定、禁止合并回单一 isCurrent):
+      // responseIsLatest —— 该响应能否写 UI(仍是最新权威 epoch 且 status 未切走)
+      const responseIsLatest = () =>
+        requestedGeneration === listGeneration && get().listStatus === status;
+      // ownsInitialSlot —— 该请求完成时能否收尾 initial slot
+      // (释放槽位 + 消费 pending + 触发 trailing)
+      const ownsInitialSlot = () =>
+        initialLoad?.status === status &&
+        initialLoad.generation === requestedGeneration;
+
+      const consumePending = () => {
+        initialLoad = null;
+        if (pendingReloadStatus === status) {
+          pendingReloadStatus = null;
+          void get().reloadList(); // trailing:入口会再次递增 epoch(正常)
+        }
+      };
+
       try {
-        const { items } = await listConversations(status);
-        set((state) => {
-          const drafts = state.sessions.filter((s) => s.draft);
-          const merged = items.map((conversation) => {
-            const fresh = toChatSession(conversation);
-            const current = state.sessions.find((s) => s.id === fresh.id);
-            if (!current) return fresh;
-            // 保留已加载的消息与在途状态,只更新顺序和后端标题
+        const { items, nextCursor } = await listConversations(status);
+        if (!ownsInitialSlot()) return; // 跨 status stale:完全退出,不触碰任何状态
+        if (responseIsLatest()) {
+          set((state) => {
+            const drafts = state.sessions.filter((s) => s.draft);
+            const merged = items.map((conversation) => {
+              const fresh = toChatSession(conversation);
+              const current = state.sessions.find((s) => s.id === fresh.id);
+              if (!current) return fresh;
+              // 保留已加载的消息与在途状态,只更新顺序和后端标题
+              return {
+                ...fresh,
+                messages: current.messages,
+                loaded: current.loaded,
+                loadingMessages: current.loadingMessages,
+                pendingRequestId: current.pendingRequestId,
+                conversationStatus: current.conversationStatus,
+                topic: current.topic || fresh.topic,
+              };
+            });
+            const sessions = [...drafts, ...merged];
+            if (!sessions.length && status === "ACTIVE") {
+              sessions.push(createDraftSession());
+            }
+            const activeId = state.sessions[state.currentSessionIndex]?.id;
+            const index = sessions.findIndex((s) => s.id === activeId);
             return {
-              ...fresh,
-              messages: current.messages,
-              loaded: current.loaded,
-              loadingMessages: current.loadingMessages,
-              pendingRequestId: current.pendingRequestId,
-              conversationStatus: current.conversationStatus,
-              topic: current.topic || fresh.topic,
+              sessions,
+              currentSessionIndex: index >= 0 ? index : 0,
+              ready: true,
+              loadingList: false,
+              listNextCursor: nextCursor,
             };
           });
-          const sessions = [...drafts, ...merged];
-          if (!sessions.length && status === "ACTIVE") {
-            sessions.push(createDraftSession());
-          }
-          const activeId = state.sessions[state.currentSessionIndex]?.id;
-          const index = sessions.findIndex((s) => s.id === activeId);
+        }
+        // ownsInitialSlot=true 但 responseIsLatest=false(同 status 在途期间被更晚
+        // 权威事件超越)→ 响应不写 UI,只收尾:释放 slot → 消费 pending → trailing
+        consumePending();
+        if (responseIsLatest()) {
+          const active = get().sessions[get().currentSessionIndex];
+          if (active) void get().loadSessionMessages(active.id);
+        }
+      } catch (error) {
+        if (!ownsInitialSlot()) return; // 跨 status stale 失败同样完全退出
+        if (responseIsLatest()) {
+          // 已有 sessions 保留(graceful degradation);旧 cursor 已在入口废弃
+          set({ loadingList: false, listReloadError: true });
+          notifyError(error);
+        }
+        // 旧 epoch 的失败不写错误 UI:trailing 本身就是自然 retry
+        consumePending(); // 失败也消费 pending(PAG-REVIEW-09)
+      }
+    },
+
+    /** PAG-1:加载下一页(追加型)。stale 响应整体丢弃;失败保留 sessions 与 cursor */
+    async loadMoreConversations() {
+      const {
+        listNextCursor,
+        loadingMoreList,
+        loadingList,
+        listStatus,
+        ready,
+      } = get();
+      if (!ready || loadingList || loadingMoreList || listNextCursor === null)
+        return;
+      const generation = listGeneration;
+      const status = listStatus;
+      const cursor = listNextCursor;
+      set({ loadingMoreList: true, listMoreError: false });
+      try {
+        const { items, nextCursor } = await listConversations(status, cursor);
+        // 权威失效事件到达(reloadList 入口递增 epoch)后,旧 loadMore 整体丢弃
+        if (generation !== listGeneration || get().listStatus !== status)
+          return;
+        set((state) => {
+          const fresh = items
+            .filter((c) => !state.sessions.some((s) => s.id === c.id))
+            .map(toChatSession);
           return {
-            sessions,
-            currentSessionIndex: index >= 0 ? index : 0,
-            ready: true,
-            loadingList: false,
+            sessions: [...state.sessions, ...fresh],
+            listNextCursor: nextCursor,
+            loadingMoreList: false,
           };
         });
-        const active = get().sessions[get().currentSessionIndex];
-        if (active) void get().loadSessionMessages(active.id);
-      } catch (error) {
-        set({ loadingList: false });
-        notifyError(error);
+      } catch {
+        if (generation !== listGeneration) return;
+        set({ loadingMoreList: false, listMoreError: true });
       }
     },
 
@@ -495,6 +609,12 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         sessions: [],
         currentSessionIndex: 0,
         ready: false,
+        // PAG-REVIEW-07:分页状态与 listStatus 同步切换
+        // (loadingList 不在此 set —— 由 reloadList 并发模型独占控制)
+        listNextCursor: null,
+        loadingMoreList: false,
+        listReloadError: false,
+        listMoreError: false,
       });
       await get().reloadList();
     },
@@ -644,6 +764,8 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       });
       const current = get().sessions[get().currentSessionIndex];
       if (current) void get().loadSessionMessages(current.id);
+      // PAG-REVIEW-10:删除 = authoritative invalidation,权威回第一页
+      void get().reloadList();
     },
 
     async archiveSession(index: number) {
@@ -665,6 +787,8 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         );
         return { sessions, currentSessionIndex: next };
       });
+      // PAG-REVIEW-10:归档 = authoritative invalidation,权威回第一页
+      void get().reloadList();
     },
 
     /** 归档列表里点「恢复」:PATCH 回 ACTIVE 并从当前列表移除 */
@@ -680,6 +804,8 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       set((state) => ({
         sessions: state.sessions.filter((s) => s.id !== session.id),
       }));
+      // PAG-REVIEW-10:恢复 = authoritative invalidation,权威回第一页
+      void get().reloadList();
     },
 
     async renameSession(sessionId: string, title: string) {
