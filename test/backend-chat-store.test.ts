@@ -266,6 +266,26 @@ function holdPost(): Hold {
   return hold;
 }
 
+/** PAG-1 FIX-01:挂起 DELETE /conversations/:id(response 由测试 release 放行),
+ * 构造 DELETE pending 窗口 —— 窗口内列表可被 reload/switchListStatus/用户
+ * reselection 改写,验证 apply 只按 targetId 生效(async identity safety)。 */
+function holdDeleteConversation(): Hold {
+  let doRelease!: (response: any) => void;
+  const promise = new Promise<any>((resolve) => {
+    doRelease = resolve;
+  });
+  const hold: Hold & { match: (call: RecordedCall) => boolean } = {
+    call: null,
+    promise,
+    release: (make) => doRelease(make()),
+    match: (call) =>
+      call.method === "DELETE" &&
+      /^\/backend-api\/conversations\/[^/?]+$/.test(call.url),
+  };
+  holds.push(hold);
+  return hold;
+}
+
 function resetServer() {
   server.conversations = [];
   server.messages = new Map();
@@ -1760,6 +1780,373 @@ describe("第 7 阶段:NextChat 以 Backend API 为唯一聊天数据源", () =>
       expect(state.listReloadError).toBe(false);
       expect(state.ready).toBe(true);
     });
+  });
+});
+
+describe("PAG-1 FIX-01:删除会话 selection identity 与 async 安全(DEL-SEL,设计文档 Revision 2)", () => {
+  /** p-1..p-N 在 ACTIVE 列表的数组序即 index 0..N-1(seed updatedAt 递减,p-1 最新) */
+  async function bootActive(count: number) {
+    server.pageSize = null;
+    seedConversations(count, "p");
+    await useChatStore.getState().bootstrap();
+    await tick();
+    await tick();
+  }
+
+  async function select(index: number) {
+    await useChatStore.getState().selectSession(index);
+    await tick();
+  }
+
+  test("DEL-SEL-01 delete conversation after current keeps current selected", async () => {
+    await bootActive(5); // p-1..p-5 = A..E
+    await select(2); // C
+
+    await useChatStore.getState().deleteSession(3); // 删除 D
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "p-1",
+      "p-2",
+      "p-3",
+      "p-5",
+    ]);
+    expect(state.currentSession().id).toBe("p-3");
+    expect(state.currentSessionIndex).toBe(2);
+  });
+
+  test("DEL-SEL-02 delete conversation before current keeps current conversation selected (FINDING-02 regression selectionShift=pag2-b-0016)", async () => {
+    await bootActive(5); // p-1..p-5 = A..E
+    await select(2); // C
+
+    await useChatStore.getState().deleteSession(1); // 删除 B
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "p-1",
+      "p-3",
+      "p-4",
+      "p-5",
+    ]);
+    // identity 保持 C 且 index 左移(纯 clamp 会让 index 停在 2 → 漂到 D)
+    expect(state.currentSession().id).toBe("p-3");
+    expect(state.currentSessionIndex).toBe(1);
+  });
+
+  test("DEL-SEL-03 delete current middle conversation selects next item", async () => {
+    await bootActive(5); // p-1..p-5 = A..E
+    await select(2); // C
+
+    await useChatStore.getState().deleteSession(2); // 删除 C
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "p-1",
+      "p-2",
+      "p-4",
+      "p-5",
+    ]);
+    expect(state.currentSession().id).toBe("p-4"); // D 占据原位
+    expect(state.currentSessionIndex).toBe(2);
+  });
+
+  test("DEL-SEL-04 delete current last conversation selects previous item", async () => {
+    await bootActive(4); // p-1..p-4 = A..D
+    await select(3); // D
+
+    await useChatStore.getState().deleteSession(3); // 删除 D
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual(["p-1", "p-2", "p-3"]);
+    expect(state.currentSession().id).toBe("p-3");
+    expect(state.currentSessionIndex).toBe(2);
+  });
+
+  test("DEL-SEL-05 delete only ACTIVE conversation enters new draft", async () => {
+    await bootActive(1); // p-1
+    await select(0);
+
+    await useChatStore.getState().deleteSession(0);
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions).toHaveLength(1);
+    expect(state.sessions[0].draft).toBe(true);
+    expect(state.currentSessionIndex).toBe(0);
+    expect(state.currentSession().id).toBe(state.sessions[0].id);
+  });
+
+  test("DEL-SEL-05B delete only ARCHIVED conversation keeps empty list state", async () => {
+    server.pageSize = null;
+    seedConversations(1, "p", "ARCHIVED");
+    await useChatStore.getState().switchListStatus("ARCHIVED");
+    await tick();
+    await tick();
+    await useChatStore.getState().selectSession(0);
+    await tick();
+
+    await useChatStore.getState().deleteSession(0);
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions).toHaveLength(0);
+    expect(state.currentSessionIndex).toBe(0);
+    expect(state.currentSession().draft).toBe(true); // placeholder 会话
+  });
+
+  test("DEL-SEL-06 delete first conversation while current is not first keeps current", async () => {
+    await bootActive(5); // p-1..p-5 = A..E
+    await select(2); // C
+
+    await useChatStore.getState().deleteSession(0); // 删除 A
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "p-2",
+      "p-3",
+      "p-4",
+      "p-5",
+    ]);
+    expect(state.currentSession().id).toBe("p-3");
+    expect(state.currentSessionIndex).toBe(1);
+  });
+
+  test("DEL-SEL-07 delete then authoritative reload keeps selection identity", async () => {
+    await bootActive(5);
+    await select(2); // C
+    const beforeList = listCalls().length;
+
+    await useChatStore.getState().deleteSession(1); // 删除 B
+    await tick();
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(listCalls().length).toBeGreaterThan(beforeList); // delete 触发权威 reload
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "p-1",
+      "p-3",
+      "p-4",
+      "p-5",
+    ]);
+    expect(state.currentSession().id).toBe("p-3"); // reload 后 identity 不漂移
+    expect(state.currentSessionIndex).toBe(1);
+  });
+
+  test("DEL-SEL-08 paginated delete rebuilds first page cursor without duplicates", async () => {
+    server.pageSize = 2;
+    seedConversations(5, "p");
+    await useChatStore.getState().bootstrap();
+    await tick();
+    await useChatStore.getState().loadMoreConversations(); // [p-1..p-4]
+    await tick();
+    await select(2); // C = p-3
+
+    await useChatStore.getState().deleteSession(1); // 删除 B = p-2
+    await tick();
+    await tick();
+
+    // 权威 reload 回第一页(server 剩 p-1,p-3,p-4,p-5 → 第一页 [p-1,p-3])
+    let state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual(["p-1", "p-3"]);
+    expect(state.currentSession().id).toBe("p-3");
+    expect(state.currentSessionIndex).toBe(1);
+    expect(state.listNextCursor).toBe(
+      encodeCursorOf(server.conversations.find((c) => c.id === "p-3")!),
+    );
+
+    await useChatStore.getState().loadMoreConversations(); // 追加 [p-4,p-5] 无重复
+    await tick();
+    state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "p-1",
+      "p-3",
+      "p-4",
+      "p-5",
+    ]);
+    expect(state.currentSession().id).toBe("p-3");
+  });
+
+  test("DEL-SEL-09 delete during in-flight loadMore:deleted stays gone, selection keeps identity", async () => {
+    server.pageSize = 2;
+    seedConversations(4, "p");
+    await useChatStore.getState().bootstrap();
+    await tick();
+    await select(1); // B = p-2
+
+    const hold = holdList((params) => params.get("cursor") !== null);
+    const loadMore = useChatStore.getState().loadMoreConversations();
+    expect(hold.call).not.toBeNull();
+
+    await useChatStore.getState().deleteSession(0); // 删除 A = p-1(当前 B 之前)
+    await tick();
+    const p4 = server.conversations.find((c) => c.id === "p-4")!;
+    hold.release(() => reply(200, { data: [p4], meta: { nextCursor: null } }));
+    await loadMore;
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions.find((s) => s.id === "p-1")).toBeUndefined(); // 不复活
+    expect(state.currentSession().id).toBe("p-2"); // identity 不漂移
+    expect(state.currentSessionIndex).toBe(0);
+  });
+
+  test("DEL-SEL-10 delete second-page boundary item:loadMore later has no duplicates", async () => {
+    server.pageSize = 2;
+    seedConversations(5, "p");
+    await useChatStore.getState().bootstrap();
+    await tick();
+    await useChatStore.getState().loadMoreConversations(); // [p-1..p-4]
+    await tick();
+    await select(0); // current = A(p-1,第一页)
+
+    await useChatStore.getState().deleteSession(2); // 删除第二页首项 C = p-3
+    await tick();
+    await tick();
+
+    let state = useChatStore.getState();
+    expect(state.sessions.find((s) => s.id === "p-3")).toBeUndefined();
+    expect(state.currentSession().id).toBe("p-1"); // 权威 reload 回第一页后 identity 保持
+
+    await useChatStore.getState().loadMoreConversations();
+    await tick();
+    state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "p-1",
+      "p-2",
+      "p-4",
+      "p-5",
+    ]); // 无重复、无 p-3 复活
+    expect(state.currentSession().id).toBe("p-1");
+  });
+
+  test("DEL-SEL-11 DELETE pending + authoritative reorder:only target removed by id", async () => {
+    server.pageSize = null;
+    seedConversations(4, "p"); // p-1..p-4 = A..D
+    await useChatStore.getState().bootstrap();
+    await tick();
+    await select(2); // C = p-3
+
+    const delHold = holdDeleteConversation();
+    // fetch mock 在 hold 命中时会先执行 DELETE route(server 立即移除 p-2)
+    // 再挂起 promise —— 所以 reload 响应所需的"删除前快照"必须在发起前捕获
+    const snapshotBeforeDelete = server.conversations
+      .filter((c) => c.status === "ACTIVE")
+      .map((c) => ({ ...c }));
+    const deleting = useChatStore.getState().deleteSession(1); // B = p-2,pending
+    expect(delHold.call).not.toBeNull();
+    await tick();
+
+    // DELETE 等待期间出现新会话 x-1 并浮顶:fake server 的列表按插入序返回,
+    // 而 seedConversations 只追加到尾部 —— 直接 unshift(updatedAt=STAMP 最新)
+    // 才能呈现"权威列表把新会话排在最前"的真实后端时序
+    server.conversations.unshift(conversation("x-1", "x-1 会话"));
+    const reloadHold = holdList(
+      (params) =>
+        params.get("status") === "ACTIVE" && params.get("cursor") === null,
+    );
+    const manualReload = useChatStore.getState().reloadList();
+    expect(reloadHold.call).not.toBeNull();
+    reloadHold.release(() =>
+      reply(200, {
+        data: [
+          server.conversations.find((c) => c.id === "x-1")!,
+          ...snapshotBeforeDelete,
+        ],
+        meta: { nextCursor: null },
+      }),
+    );
+    await manualReload;
+    await tick();
+    // reload 响应含 B:apply 前列表 = [x-1, p-1, p-2, p-3, p-4](C 左移后仍在)
+    let state = useChatStore.getState();
+    expect(state.sessions.find((s) => s.id === "p-2")).toBeDefined();
+
+    delHold.release(() => delHold.committed);
+    await deleting;
+    await tick();
+    await tick();
+
+    state = useChatStore.getState();
+    // 只删 B(p-2):x-1/A/C/D 全保留;selection 保持 C(按 apply 时最新列表定位)
+    expect(state.sessions.map((s) => s.id)).toEqual([
+      "x-1",
+      "p-1",
+      "p-3",
+      "p-4",
+    ]);
+    expect(state.currentSession().id).toBe("p-3");
+  });
+
+  test("DEL-SEL-12 DELETE pending + switchListStatus:ARCHIVED list untouched", async () => {
+    seedConversations(3, "p"); // ACTIVE A..C
+    seedConversations(3, "z", "ARCHIVED"); // z-1..z-3
+    await useChatStore.getState().bootstrap();
+    await tick();
+
+    const delHold = holdDeleteConversation();
+    const deleting = useChatStore.getState().deleteSession(1); // B = p-2,pending
+    expect(delHold.call).not.toBeNull();
+    await tick();
+
+    await useChatStore.getState().switchListStatus("ARCHIVED");
+    await tick();
+    await tick();
+    expect(useChatStore.getState().sessions.map((s) => s.id)).toEqual([
+      "z-1",
+      "z-2",
+      "z-3",
+    ]);
+
+    delHold.release(() => delHold.committed);
+    await deleting;
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    // target(p-2)不在当前 ARCHIVED 列表 → local no-op,零误删、selection 保持
+    expect(state.sessions.map((s) => s.id)).toEqual(["z-1", "z-2", "z-3"]);
+    expect(state.currentSession().id).toBe("z-1");
+    expect(state.currentSessionIndex).toBe(0);
+  });
+
+  test("DEL-SEL-13 DELETE pending + user reselection keeps latest selection", async () => {
+    server.pageSize = null;
+    seedConversations(4, "p"); // A..D
+    await useChatStore.getState().bootstrap();
+    await tick();
+    await select(1); // B = p-2
+
+    const delHold = holdDeleteConversation();
+    const deleting = useChatStore.getState().deleteSession(0); // A = p-1,pending
+    expect(delHold.call).not.toBeNull();
+    await tick();
+
+    await select(3); // 用户主动选 D = p-4
+
+    delHold.release(() => delHold.committed);
+    await deleting;
+    await tick();
+    await tick();
+
+    const state = useChatStore.getState();
+    expect(state.sessions.map((s) => s.id)).toEqual(["p-2", "p-3", "p-4"]);
+    // DELETE 完成不得恢复到发起时的 B —— 保留用户最新选择 D
+    expect(state.currentSession().id).toBe("p-4");
+    expect(state.currentSessionIndex).toBe(2);
   });
 });
 

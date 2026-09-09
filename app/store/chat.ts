@@ -1373,10 +1373,14 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       const session = get().sessions.at(index);
       if (!session) return;
 
+      // 跨 await 只保存 identity,不保存 position —— 网络往返期间列表可被
+      // reload/浮顶重排/switchListStatus 改写,调用时 index 不再可信(PAG-1 FIX-01)
+      const targetId = session.id;
+
       if (!session.draft) {
-        closeStream(session.id);
+        closeStream(targetId);
         try {
-          await deleteConversation(session.id);
+          await deleteConversation(targetId);
         } catch (error) {
           notifyError(error);
           return;
@@ -1384,17 +1388,43 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       }
 
       set((state) => {
+        // apply 时在最新 state 上按 targetId 重定位
+        const removeIndex = state.sessions.findIndex((s) => s.id === targetId);
+        if (removeIndex < 0) {
+          // target 已不在当前列表(await 期间被权威刷新/切状态移除):
+          // 本地 no-op,绝不按旧 index 误删当前列表中的其他项
+          return {};
+        }
+        // current selection identity 也必须在 apply 时读取:DELETE 等待期间
+        // 用户可能主动切换 selection,不得被发起时的快照覆盖
+        const currentId = state.sessions[state.currentSessionIndex]?.id;
         const sessions = state.sessions.slice();
-        sessions.splice(index, 1);
-        if (!sessions.length && get().listStatus === "ACTIVE")
+        sessions.splice(removeIndex, 1);
+        if (!sessions.length && state.listStatus === "ACTIVE")
           sessions.push(createDraftSession());
-        const next = Math.max(
-          0,
-          Math.min(state.currentSessionIndex, sessions.length - 1),
-        );
+        // identity-first:删除非当前前项时原当前会话左移,纯 clamp 会漂到右邻项
+        // (FINDING-02);删的是当前项则原位下一项 / 最后项前一项
+        let next: number;
+        if (currentId !== undefined && currentId !== targetId) {
+          const found = sessions.findIndex((s) => s.id === currentId);
+          next =
+            found >= 0
+              ? found
+              : Math.max(
+                  0,
+                  Math.min(state.currentSessionIndex, sessions.length - 1),
+                );
+        } else if (currentId === targetId) {
+          next = Math.max(0, Math.min(removeIndex, sessions.length - 1));
+        } else {
+          next = Math.max(
+            0,
+            Math.min(state.currentSessionIndex, sessions.length - 1),
+          );
+        }
         return { sessions, currentSessionIndex: next };
       });
-      clearMessageRequestOwnership(session.id);
+      clearMessageRequestOwnership(targetId);
       const current = get().sessions[get().currentSessionIndex];
       if (current) void get().loadSessionMessages(current.id);
       // PAG-REVIEW-10:删除 = authoritative invalidation,权威回第一页
