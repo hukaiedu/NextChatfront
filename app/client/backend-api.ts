@@ -288,12 +288,48 @@ export function deleteConversation(id: string): Promise<void> {
   });
 }
 
-export function listMessages(
+/** PAG-2:GET messages 分页返回(旧→新 items + 下一页游标 + 会话消息总数) */
+export interface BackendMessagePage {
+  items: BackendMessage[];
+  nextCursor: string | null;
+  totalCount: number;
+}
+
+/**
+ * GET /api/conversations/:id/messages(PAG-2 分页版)。
+ *
+ * 必须 raw fetch 而不是 call<T>:call 只返回 payload.data,拿不到
+ * meta.nextCursor / meta.totalCount。错误语义与 listConversations 一致。
+ */
+export async function listMessages(
   conversationId: string,
-): Promise<BackendMessage[]> {
-  return call<BackendMessage[]>(
-    `/conversations/${encodeURIComponent(conversationId)}/messages`,
-  );
+  page: { limit?: number; cursor?: string | null } = {},
+): Promise<BackendMessagePage> {
+  const query = new URLSearchParams({ limit: String(page.limit ?? 50) });
+  if (page.cursor) query.set("cursor", page.cursor);
+  const path = `/conversations/${encodeURIComponent(conversationId)}/messages`;
+  const response = await fetch(`${PREFIX}${path}?${query.toString()}`);
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = (
+      payload as { error?: { code?: string; message?: string } } | null
+    )?.error;
+    notifyUnauthorizedIfNeeded(path, response.status, error?.code);
+    throw new BackendApiError(
+      error?.code ?? "NETWORK_ERROR",
+      error?.message ?? `Request failed with status ${response.status}`,
+      response.status,
+    );
+  }
+  const body = payload as {
+    data: BackendMessage[];
+    meta?: { nextCursor?: string | null; totalCount?: number };
+  };
+  return {
+    items: body.data ?? [],
+    nextCursor: body.meta?.nextCursor ?? null,
+    totalCount: body.meta?.totalCount ?? 0,
+  };
 }
 
 export function sendMessage(

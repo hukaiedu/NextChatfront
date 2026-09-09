@@ -107,6 +107,10 @@ function fakeSession(id: string, topic: string): ChatSession {
     mask: createEmptyMask(),
     loaded: true,
     draft: false,
+    messageNextCursor: null,
+    loadingOlderMessages: false,
+    messageHistoryError: false,
+    messageTotalCount: 0,
   };
 }
 

@@ -11,7 +11,9 @@ import { createEmptyMask, Mask } from "./mask";
 import {
   BackendApiError,
   BackendMessage,
+  BackendMessagePage,
   BackendModelOption,
+  BackendRequest,
   ConversationStatus,
   RequestStatusFrame,
   cancelRequest as cancelBackendRequest,
@@ -62,6 +64,11 @@ export type ChatMessage = RequestMessage & {
   tools?: ChatMessageTool[];
   audio_url?: string;
   isMcpResponse?: boolean;
+  /**
+   * PAG-2:后端 position;persisted Backend Message 必有,local transient(persisted 前的
+   * 本地占位 / send 失败 error bubble)允许 undefined。禁止 ?? 0 之类的兜底。
+   */
+  position?: number;
 };
 
 export function createMessage(override: Partial<ChatMessage>): ChatMessage {
@@ -104,6 +111,16 @@ export interface ChatSession {
   cancelling?: boolean;
   /** M4:会话模型偏好(null = 默认模型);后端 Conversation 是唯一持久化来源 */
   preferredModelKey?: string | null;
+
+  // PAG-2 Message 分页四字段(§11):
+  /** 更老一页游标;null = 已到最老/无更老历史 */
+  messageNextCursor: string | null;
+  /** loadOlderMessages 单飞闸门 */
+  loadingOlderMessages: boolean;
+  /** 加载更老历史失败(唯一置 true 路径 = loadOlder 当前 cursor 失败;Retry 重发同 cursor) */
+  messageHistoryError: boolean;
+  /** 会话 Message 后端总数(meta.totalCount 权威建立;send 经 Math.max 单调推进) */
+  messageTotalCount: number;
 }
 
 let _defaultTopic: string | undefined;
@@ -193,6 +210,10 @@ export function createDraftSession(): ChatSession {
     draft: true,
     loaded: true,
     conversationStatus: "ACTIVE",
+    messageNextCursor: null,
+    loadingOlderMessages: false,
+    messageHistoryError: false,
+    messageTotalCount: 0,
   };
 }
 
@@ -233,6 +254,8 @@ function toChatMessage(message: BackendMessage): ChatMessage {
     isError: message.role === "ASSISTANT" && failed,
     errorCode: failed ? request?.errorCode ?? undefined : undefined,
     model: BACKEND_MODEL_LABEL,
+    // PAG-2:persisted Backend Message 的 position 原样写入(缺省即 invariant,不兜底)
+    position: message.position,
   };
 }
 
@@ -240,6 +263,98 @@ function isMessageSettled(status: BackendMessage["status"]): boolean {
   return (
     status === "COMPLETED" || status === "FAILED" || status === "CANCELLED"
   );
+}
+
+/**
+ * PAG-2 唯一同 id Message 合并规则(全文档唯一,三入口共用:latest overlap 区合并 /
+ * bootstrap 同 id overlay / send-result ASSISTANT upsert)。
+ * 规则表(状态只允许向终态推进,不允许倒退):
+ * - local 终态 + fresh PENDING/STREAMING → local(stale 后端快照不得倒退本地终态/流式内容)
+ * - local streaming + fresh 非 settled → local(防 SSE delta 闪断)
+ * - local streaming + fresh settled → fresh(向终态推进,合法)
+ * - 其他 → fresh(后端权威)
+ * ChatMessage 里 settled ⇔ streaming!==true(FAILED/CANCELLED/COMPLETED 均推导出 false),
+ * 于是四行收敛为:fresh 未终态 → 保留 local,fresh 已终态 → 采用 fresh。
+ */
+export function mergeFreshMessageWithLocal(
+  fresh: ChatMessage,
+  local: ChatMessage,
+): ChatMessage {
+  return fresh.streaming ? local : fresh;
+}
+
+/**
+ * PAG-2:send result 落位唯一 helper(REVIEW-36 id-upsert,替代 concat):
+ * USER 本地不存在 → append,同 id 已存在 → 不重复插入;
+ * ASSISTANT 本地不存在 → 插入(streaming 保持 toChatMessage 按 Backend status 推导,
+ * 禁手工强制 true),同 id 已存在 → 复用上方唯一合并规则,POST 初始 PENDING 快照
+ * 不得覆盖 GET/SSE 已得到的较新状态。
+ */
+export function applySendResultMessages(
+  currentMessages: ChatMessage[],
+  userMessage: ChatMessage,
+  assistantMessage: ChatMessage,
+): ChatMessage[] {
+  const next = currentMessages.slice();
+  if (!next.some((m) => m.id === userMessage.id)) {
+    next.push(userMessage);
+  }
+  const assistantIndex = next.findIndex((m) => m.id === assistantMessage.id);
+  if (assistantIndex < 0) {
+    next.push(assistantMessage);
+  } else {
+    next[assistantIndex] = mergeFreshMessageWithLocal(
+      assistantMessage,
+      next[assistantIndex]!,
+    );
+  }
+  return next;
+}
+
+/**
+ * PAG-2:send 侧 Request tracking 条件性 reconciliation(REVIEW-37 唯一纯函数,S1/S2/S3)。
+ * 判定必须基于 merge 后的 assistant(当前本地最新事实),不是 POST 返回的旧创建快照;
+ * 只有「当前尚未 tracking 该 request + request active(isRequestFinished 唯一入口)+
+ * merge 后 assistant streaming」才置 pending + follow(恰 1 次)。
+ */
+export function reconcileSendRequestTracking(
+  currentPendingRequestId: string | undefined,
+  request: BackendRequest,
+  mergedAssistant: ChatMessage,
+): { nextPendingRequestId: string | undefined; shouldFollowRequest: boolean } {
+  const requestFinished = isRequestFinished(request.status);
+  const assistantStillStreaming = mergedAssistant.streaming === true;
+
+  // S1:当前 pending 已经是同一个 Request(GET/latest 已先发现并建立 SSE)
+  if (currentPendingRequestId === request.id) {
+    if (requestFinished || !assistantStillStreaming) {
+      // request terminal,或 merge 后 assistant 已 terminal:不能复活 pending
+      return { nextPendingRequestId: undefined, shouldFollowRequest: false };
+    }
+    // request active + merged assistant streaming:SSE 已在工作,绝不 close/reopen
+    return { nextPendingRequestId: request.id, shouldFollowRequest: false };
+  }
+
+  // S2:当前没有 pending(正常「POST response 先到」路径)
+  if (currentPendingRequestId === undefined) {
+    if (requestFinished || !assistantStillStreaming) {
+      // GET/SSE 已经先完成该 request,POST 旧 PENDING 快照后到:不得重新订阅
+      return { nextPendingRequestId: undefined, shouldFollowRequest: false };
+    }
+    return { nextPendingRequestId: request.id, shouldFollowRequest: true };
+  }
+
+  // S3:当前 pending 是另一个 Request —— 不得因可能 stale / deduplicated 的 POST
+  // response 关掉当前另一条正在工作的 SSE;不引入更复杂的冲突恢复机制
+  console.warn(
+    "[Chat] invariant: send response request 与当前 pending 不一致",
+    currentPendingRequestId,
+    request.id,
+  );
+  return {
+    nextPendingRequestId: currentPendingRequestId,
+    shouldFollowRequest: false,
+  };
 }
 
 function applyStatusToMessage(
@@ -294,6 +409,10 @@ function toChatSession(conversation: {
     conversationStatus:
       conversation.status === "ARCHIVED" ? "ARCHIVED" : "ACTIVE",
     preferredModelKey: conversation.preferredModelKey ?? null,
+    messageNextCursor: null,
+    loadingOlderMessages: false,
+    messageHistoryError: false,
+    messageTotalCount: 0,
   };
 }
 
@@ -327,6 +446,12 @@ interface ChatActions {
   switchListStatus(status: ConversationStatus): Promise<void>;
   loadSessionMessages(sessionId: string): Promise<void>;
   refreshSessionMessages(sessionId: string): Promise<void>;
+  /** PAG-2:向上加载更老一页(§13);返回值仅供 caller cleanup / 测试 / 调试 */
+  loadOlderMessages(
+    sessionId: string,
+  ): Promise<{ applied: boolean; prependedCount: number }>;
+  /** PAG-2:Export 独立全量 snapshot(§27.1),不写回 ChatStore */
+  prepareMessagesForExport(sessionId: string): Promise<ChatMessage[]>;
   selectSession(index: number): void;
   nextSession(delta: number): void;
   newSession(mask?: Mask): void;
@@ -391,6 +516,40 @@ export const useChatStore = create<ChatStore>()((set, get) => {
    * 后续权威刷新折叠为最多 1 次 trailing,由 ownsInitialSlot 的请求收尾消费 */
   let pendingReloadStatus: ConversationStatus | null = null;
 
+  // PAG-2 Message 分页(§12/§18):per-session ownership 闭包结构,非 zustand state。
+  // 不引入 PAG-1 式全局 epoch —— Message 分页是 per-session 独立游标,粒度 = conversationId。
+  const LATEST_MESSAGES_LIMIT = 50;
+  /** freshness intent version,per conversation(§12) */
+  const latestMessageVersions = new Map<string, number>();
+  /** 当前 inflight latest HTTP(§12) */
+  const latestMessageRequestSlots = new Map<
+    string,
+    { token: symbol; version: number }
+  >();
+  /** trailing refresh intent(§12) */
+  const pendingLatestRefreshIds = new Set<string>();
+  /** loadOlderMessages 归属(§13) */
+  const olderMessageRequestTokens = new Map<string, symbol>();
+  /** prepareMessagesForExport 归属(§27.1) */
+  const exportMessageRequestTokens = new Map<string, symbol>();
+
+  /** 清除结构的唯一入口(§18 REVIEW-12,禁止业务函数散落 map.delete) */
+  function clearMessageRequestOwnership(sessionId: string): void {
+    latestMessageVersions.delete(sessionId);
+    latestMessageRequestSlots.delete(sessionId);
+    pendingLatestRefreshIds.delete(sessionId);
+    olderMessageRequestTokens.delete(sessionId);
+    exportMessageRequestTokens.delete(sessionId);
+  }
+
+  function clearAllMessageRequestOwnership(): void {
+    latestMessageVersions.clear();
+    latestMessageRequestSlots.clear();
+    pendingLatestRefreshIds.clear();
+    olderMessageRequestTokens.clear();
+    exportMessageRequestTokens.clear();
+  }
+
   /** 按 id 改某条消息:订阅回调可能在会话切换 / 删除之后才到达 */
   function patchMessage(
     sessionId: string,
@@ -436,6 +595,11 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         topic: created.title,
         draft: false,
         loaded: true,
+        // §11 来源 B:新建会话 = 合法空 chain,六项写死
+        messageNextCursor: null,
+        loadingOlderMessages: false,
+        messageHistoryError: false,
+        messageTotalCount: 0,
         lastUpdate: new Date(created.updatedAt).getTime(),
         preferredModelKey: created.preferredModelKey ?? null,
       };
@@ -450,6 +614,350 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       return { sessions, currentSessionIndex: index };
     });
     return created.id;
+  }
+
+  /**
+   * §14.4:latest 侧 pendingRequestId reconciliation(merge 完成之后执行)。
+   * 判定基于 merge 后 assistant + fresh 携带的 request 摘要;Request terminal 唯一入口
+   * isRequestFinished,Message 终态用 isMessageSettled 推导的 streaming,两套不混用。
+   * 只有「新发现 running Request」才 shouldFollowRequest=true(followRequest 非幂等)。
+   */
+  function reconcileLatestPendingRequest(
+    currentPendingRequestId: string | undefined,
+    mergedMessages: ChatMessage[],
+    freshItems: BackendMessage[],
+  ): {
+    nextPendingRequestId: string | undefined;
+    shouldFollowRequest: boolean;
+    followMessageId?: string;
+  } {
+    if (currentPendingRequestId) {
+      const freshAssistant = freshItems.find(
+        (m) =>
+          m.role === "ASSISTANT" && m.request?.id === currentPendingRequestId,
+      );
+      if (!freshAssistant?.request) {
+        // fresh 未包含 currentPending:absence 不是 terminal proof,保留
+        return {
+          nextPendingRequestId: currentPendingRequestId,
+          shouldFollowRequest: false,
+        };
+      }
+      if (isRequestFinished(freshAssistant.request.status)) {
+        // fresh 明确带回终态(SUCCESS/FAILED/TIMEOUT/CANCELLED):clear
+        return { nextPendingRequestId: undefined, shouldFollowRequest: false };
+      }
+      // 仍 active:merge 后 assistant streaming → 保留,绝不 close/reopen
+      const mergedAssistant = mergedMessages.find(
+        (m) => m.id === freshAssistant.id,
+      );
+      if (mergedAssistant?.streaming === true) {
+        return {
+          nextPendingRequestId: currentPendingRequestId,
+          shouldFollowRequest: false,
+        };
+      }
+      // 本地终态已先落盘:不得重新保持/恢复
+      return { nextPendingRequestId: undefined, shouldFollowRequest: false };
+    }
+
+    const candidate = freshItems.find(
+      (m) =>
+        m.role === "ASSISTANT" &&
+        m.request &&
+        !isRequestFinished(m.request.status),
+    );
+    if (!candidate?.request) {
+      return { nextPendingRequestId: undefined, shouldFollowRequest: false };
+    }
+    const mergedCandidate = mergedMessages.find((m) => m.id === candidate.id);
+    if (mergedCandidate?.streaming === true) {
+      // 新发现 running → 恢复 pending + follow 恰 1 次
+      return {
+        nextPendingRequestId: candidate.request.id,
+        shouldFollowRequest: true,
+        followMessageId: candidate.id,
+      };
+    }
+    // merge 后 candidate 已 terminal:不得从 stale fresh 重新创建
+    return { nextPendingRequestId: undefined, shouldFollowRequest: false };
+  }
+
+  /**
+   * §14:latest 响应 apply(chainEstablished 分支 + 三段 merge + empty 边界)。
+   * 调用前置条件:responseIsLatest === true(§12);本函数只做 apply,不做 stale 判定。
+   */
+  function applyLatestPage(sessionId: string, page: BackendMessagePage): void {
+    const current = get().sessions.find((s) => s.id === sessionId);
+    if (!current || current.draft) return;
+    const chainEstablished = current.loaded === true;
+    const fresh = page.items;
+
+    // §14.5 ③:空 items 与正 totalCount 自相矛盾 → 不 apply
+    if (fresh.length === 0 && page.totalCount > 0) {
+      notifyError(new Error("Inconsistent message page response"));
+      return;
+    }
+
+    let nextMessages: ChatMessage[];
+    let nextCursor: string | null;
+    let nextTotalCount: number;
+    let nextHistoryError: boolean;
+
+    if (!chainEstablished) {
+      // §14.2 bootstrap latest:fresh 建 chain + 同 id overlay
+      const currentPersisted = current.messages.filter(
+        (m) => m.position !== undefined,
+      );
+      if (fresh.length === 0) {
+        // §14.5 ①:本地已有 persisted send result 而后端 0 条 → inconsistent
+        if (currentPersisted.length > 0) {
+          notifyError(new Error("Inconsistent empty bootstrap page"));
+          return;
+        }
+        nextMessages = [];
+        nextCursor = null;
+        nextTotalCount = 0;
+        nextHistoryError = false;
+      } else {
+        // send-result presence invariant(REVIEW-30):pending 对应 assistant 必在最新页
+        const currentPendingId = current.pendingRequestId;
+        if (
+          currentPendingId &&
+          !fresh.some(
+            (m) => m.role === "ASSISTANT" && m.request?.id === currentPendingId,
+          )
+        ) {
+          notifyError(new Error("Inconsistent bootstrap page"));
+          return;
+        }
+        const localById = new Map(
+          currentPersisted.map((m) => [m.id, m] as const),
+        );
+        nextMessages = fresh.map((backendMessage) => {
+          const freshMessage = toChatMessage(backendMessage);
+          const local = localById.get(freshMessage.id);
+          return local
+            ? mergeFreshMessageWithLocal(freshMessage, local)
+            : freshMessage;
+        });
+        nextCursor = page.nextCursor;
+        nextTotalCount = page.totalCount;
+        nextHistoryError = false;
+      }
+    } else {
+      // §14.3 chainEstablished=true 三分类
+      const currentPersisted = current.messages.filter(
+        (m) => m.position !== undefined,
+      );
+      if (fresh.length === 0) {
+        // §14.5 ②:异常 authoritative reset(meta.totalCount 必为 0,③ 已拦截 >0)
+        nextMessages = [];
+        nextCursor = null;
+        nextTotalCount = page.totalCount;
+        nextHistoryError = false;
+      } else if (currentPersisted.length === 0) {
+        // Case 0:合法空链重建为非空
+        nextMessages = fresh.map(toChatMessage);
+        nextCursor = page.nextCursor;
+        nextTotalCount = Math.max(current.messageTotalCount, page.totalCount);
+        nextHistoryError = false;
+      } else {
+        const freshPositions = fresh.map((m) => m.position);
+        const freshMin = Math.min(...freshPositions);
+        const freshMax = Math.max(...freshPositions);
+        const localMax = Math.max(
+          ...currentPersisted.map((m) => m.position as number),
+        );
+        if (freshMin > localMax + 1) {
+          // Case 2:gap fallback,整组替换重建连续链
+          nextMessages = fresh.map(toChatMessage);
+          nextCursor = page.nextCursor;
+          nextTotalCount = Math.max(current.messageTotalCount, page.totalCount);
+          nextHistoryError = false;
+        } else {
+          // Case 1:overlap / adjacent 三段 merge
+          const localById = new Map(
+            currentPersisted.map((m) => [m.id, m] as const),
+          );
+          const older = currentPersisted.filter(
+            (m) => (m.position as number) < freshMin,
+          );
+          const newer = currentPersisted.filter(
+            (m) => (m.position as number) > freshMax,
+          );
+          const overlap = fresh.map((backendMessage) => {
+            const freshMessage = toChatMessage(backendMessage);
+            const local = localById.get(freshMessage.id);
+            return local
+              ? mergeFreshMessageWithLocal(freshMessage, local)
+              : freshMessage;
+          });
+          nextMessages = [...older, ...overlap, ...newer];
+          // older 游标与 latest 无关,refresh 只看最新页 → 保持旧值(REVIEW-11)
+          nextCursor = current.messageNextCursor;
+          nextTotalCount = Math.max(current.messageTotalCount, page.totalCount);
+          // 普通 latest refresh 不清 older 失败态(REVIEW-29)
+          nextHistoryError = current.messageHistoryError;
+        }
+      }
+    }
+
+    const hadPending = current.pendingRequestId !== undefined;
+    const reconciliation = reconcileLatestPendingRequest(
+      current.pendingRequestId,
+      nextMessages,
+      fresh,
+    );
+    set((state) => ({
+      sessions: state.sessions.map((s) => {
+        if (s.id !== sessionId) return s;
+        return {
+          ...s,
+          messages: nextMessages,
+          loaded: true,
+          messageNextCursor: nextCursor,
+          messageTotalCount: nextTotalCount,
+          messageHistoryError: nextHistoryError,
+          pendingRequestId: reconciliation.nextPendingRequestId,
+          ...(hadPending && reconciliation.nextPendingRequestId === undefined
+            ? { cancelling: false }
+            : {}),
+        };
+      }),
+    }));
+    if (
+      reconciliation.shouldFollowRequest &&
+      reconciliation.nextPendingRequestId &&
+      reconciliation.followMessageId
+    ) {
+      get().followRequest(
+        sessionId,
+        reconciliation.nextPendingRequestId,
+        reconciliation.followMessageId,
+      );
+    }
+  }
+
+  /**
+   * §12:latest HTTP 内核(initial / refresh / trailing 共用)。
+   * stale(成功或失败)完全静默;finally 原子 handoff(ownsLatestSlot 才有权收尾)。
+   */
+  async function runLatestMessagesHttp(
+    sessionId: string,
+    token: symbol,
+    requestVersion: number,
+  ): Promise<void> {
+    const responseIsLatest = () =>
+      latestMessageVersions.get(sessionId) === requestVersion &&
+      latestMessageRequestSlots.get(sessionId)?.token === token &&
+      !!get().sessions.find((s) => s.id === sessionId && !s.draft);
+    try {
+      let page: BackendMessagePage;
+      try {
+        page = await listMessages(sessionId, { limit: LATEST_MESSAGES_LIMIT });
+      } catch (error) {
+        if (responseIsLatest()) {
+          notifyError(error);
+        }
+        return;
+      }
+      if (!responseIsLatest()) return; // stale:完全不写 state
+      applyLatestPage(sessionId, page);
+    } finally {
+      if (latestMessageRequestSlots.get(sessionId)?.token === token) {
+        if (pendingLatestRefreshIds.has(sessionId)) {
+          // 原子 handoff:旧 slot → trailing 新 slot 一步替换,loadingMessages 恒 true
+          pendingLatestRefreshIds.delete(sessionId);
+          const trailingToken = Symbol("latest");
+          latestMessageRequestSlots.set(sessionId, {
+            token: trailingToken,
+            version: latestMessageVersions.get(sessionId) ?? requestVersion,
+          });
+          void runLatestMessagesHttp(
+            sessionId,
+            trailingToken,
+            latestMessageVersions.get(sessionId) ?? requestVersion,
+          );
+        } else {
+          latestMessageRequestSlots.delete(sessionId);
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === sessionId ? { ...s, loadingMessages: false } : s,
+            ),
+          }));
+        }
+      }
+    }
+  }
+
+  /**
+   * §12.1:send 成功 = latest 快照失效事件,五分支(D 优先于 inflight 判定)。
+   * loaded / totalCount / latest slot 的唯一 owner;send 结果落位不在此函数。
+   */
+  function handleLatestAfterSend(
+    sessionId: string,
+    options: {
+      wasDraft: boolean;
+      chainWasEstablishedAtApply: boolean;
+      assistantPosition: number;
+    },
+  ): void {
+    const advanceTotalCount = () => {
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId
+            ? {
+                ...s,
+                messageTotalCount: Math.max(
+                  s.messageTotalCount,
+                  options.assistantPosition,
+                ),
+              }
+            : s,
+        ),
+      }));
+    };
+
+    // D:草稿首次成功 send,历史 = 本次 user + assistant,完整已知
+    if (options.wasDraft) {
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId
+            ? {
+                ...s,
+                loaded: true,
+                messageNextCursor: null,
+                messageTotalCount: Math.max(
+                  s.messageTotalCount,
+                  options.assistantPosition,
+                ),
+              }
+            : s,
+        ),
+      }));
+      return;
+    }
+
+    if (latestMessageRequestSlots.has(sessionId)) {
+      // A1/A2:旧 response 从 send success 一刻起 stale;intent 由 pending 承载
+      const version = (latestMessageVersions.get(sessionId) ?? 0) + 1;
+      latestMessageVersions.set(sessionId, version);
+      pendingLatestRefreshIds.add(sessionId);
+      if (options.chainWasEstablishedAtApply) {
+        advanceTotalCount(); // A1:立即同步,不等 trailing
+      }
+      // A2:totalCount 不变(禁止 0+2 冒充),loaded 保持 false
+      return;
+    }
+
+    if (options.chainWasEstablishedAtApply) {
+      advanceTotalCount(); // B:send result 已是权威新尾部,不额外 GET
+      return;
+    }
+
+    // C:existing unloaded → 启动 bootstrap latest(loaded 保持 false 直到成功)
+    void get().loadSessionMessages(sessionId);
   }
 
   const actions: ChatActions = {
@@ -528,6 +1036,11 @@ export const useChatStore = create<ChatStore>()((set, get) => {
                 pendingRequestId: current.pendingRequestId,
                 conversationStatus: current.conversationStatus,
                 topic: current.topic || fresh.topic,
+                // PAG-2 §20:列表权威刷新不得丢会话 Message 分页进度
+                messageNextCursor: current.messageNextCursor,
+                loadingOlderMessages: current.loadingOlderMessages,
+                messageHistoryError: current.messageHistoryError,
+                messageTotalCount: current.messageTotalCount,
               };
             });
             const sessions = [...drafts, ...merged];
@@ -604,6 +1117,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
     async switchListStatus(status: ConversationStatus) {
       if (get().listStatus === status && get().ready) return;
       closeAllStreams();
+      clearAllMessageRequestOwnership();
       set({
         listStatus: status,
         sessions: [],
@@ -619,7 +1133,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       await get().reloadList();
     },
 
-    /** 打开会话:未加载过就拉消息,并续接仍在执行的 Request(§八) */
+    /** 打开会话:未加载过就拉最新一页,并续接仍在执行的 Request(§八/§12) */
     async loadSessionMessages(sessionId: string) {
       const session = get().sessions.find((s) => s.id === sessionId);
       if (
@@ -630,56 +1144,173 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       )
         return;
 
+      const version = (latestMessageVersions.get(sessionId) ?? 0) + 1;
+      latestMessageVersions.set(sessionId, version);
+      const token = Symbol("latest");
+      latestMessageRequestSlots.set(sessionId, { token, version });
       set((state) => ({
         sessions: state.sessions.map((s) =>
           s.id === sessionId ? { ...s, loadingMessages: true } : s,
         ),
       }));
+      await runLatestMessagesHttp(sessionId, token, version);
+    },
 
-      try {
-        const messages = await listMessages(sessionId);
-        const running = messages.find(
-          (m) =>
-            m.role === "ASSISTANT" &&
-            m.request &&
-            !isRequestFinished(m.request.status),
+    /** 手动刷新:authoritative refresh intent(§12),顺带续接仍在执行的 Request */
+    async refreshSessionMessages(sessionId: string) {
+      const session = get().sessions.find((s) => s.id === sessionId);
+      if (!session || session.draft) return;
+
+      // 第一件事就是 bump:version 增加的这一刻,一切在飞 latest response 已经 stale
+      const nextVersion = (latestMessageVersions.get(sessionId) ?? 0) + 1;
+      latestMessageVersions.set(sessionId, nextVersion);
+      if (latestMessageRequestSlots.has(sessionId)) {
+        // 不并发第二个 HTTP,intent 由 pending 承载(trailing)
+        pendingLatestRefreshIds.add(sessionId);
+        return;
+      }
+      const token = Symbol("latest");
+      latestMessageRequestSlots.set(sessionId, { token, version: nextVersion });
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, loadingMessages: true } : s,
+        ),
+      }));
+      await runLatestMessagesHttp(sessionId, token, nextVersion);
+    },
+
+    /** PAG-2 §13:向上加载更老一页;guard 五条件即单飞闸门 */
+    async loadOlderMessages(sessionId) {
+      const session = get().sessions.find((s) => s.id === sessionId);
+      if (
+        !session ||
+        session.draft ||
+        !session.loaded ||
+        session.loadingOlderMessages ||
+        session.messageNextCursor === null
+      ) {
+        return { applied: false, prependedCount: 0 };
+      }
+      const token = Symbol("older");
+      const requestedCursor = session.messageNextCursor;
+      olderMessageRequestTokens.set(sessionId, token);
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, loadingOlderMessages: true } : s,
+        ),
+      }));
+      const writeGuardOk = () => {
+        const current = get().sessions.find((s) => s.id === sessionId);
+        return (
+          !!current &&
+          !current.draft &&
+          olderMessageRequestTokens.get(sessionId) === token &&
+          current.loadingOlderMessages === true &&
+          current.messageNextCursor === requestedCursor
         );
+      };
+      try {
+        let page: BackendMessagePage;
+        try {
+          page = await listMessages(sessionId, {
+            limit: LATEST_MESSAGES_LIMIT,
+            cursor: requestedCursor,
+          });
+        } catch {
+          // 失败(检查通过时):唯一 messageHistoryError=true 路径,其余全不动,不 toast
+          if (writeGuardOk()) {
+            set((state) => ({
+              sessions: state.sessions.map((s) =>
+                s.id === sessionId ? { ...s, messageHistoryError: true } : s,
+              ),
+            }));
+          }
+          return { applied: false, prependedCount: 0 };
+        }
+        // 写盘前五重检查,任一不满足 → 整体丢弃
+        if (!writeGuardOk()) return { applied: false, prependedCount: 0 };
+        const items = page.items.map(toChatMessage);
         set((state) => ({
           sessions: state.sessions.map((s) =>
             s.id === sessionId
               ? {
                   ...s,
-                  messages: messages.map(toChatMessage),
-                  loaded: true,
-                  loadingMessages: false,
-                  pendingRequestId: running?.request?.id,
+                  messages: [...items, ...s.messages],
+                  messageNextCursor: page.nextCursor,
+                  messageTotalCount: Math.max(
+                    s.messageTotalCount,
+                    page.totalCount,
+                  ),
+                  messageHistoryError: false,
                 }
               : s,
           ),
         }));
-        if (running?.request) {
-          get().followRequest(sessionId, running.request.id, running.id);
+        return { applied: true, prependedCount: items.length };
+      } finally {
+        // 仅当归属仍是自己才收尾,否则说明已有新请求接管
+        if (olderMessageRequestTokens.get(sessionId) === token) {
+          olderMessageRequestTokens.delete(sessionId);
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === sessionId ? { ...s, loadingOlderMessages: false } : s,
+            ),
+          }));
         }
-      } catch (error) {
-        set((state) => ({
-          sessions: state.sessions.map((s) =>
-            s.id === sessionId ? { ...s, loadingMessages: false } : s,
-          ),
-        }));
-        notifyError(error);
       }
     },
 
-    /** 手动刷新:重新拉后端历史,顺带续接可能仍在执行的 Request */
-    async refreshSessionMessages(sessionId: string) {
-      set((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === sessionId
-            ? { ...s, loaded: false, loadingMessages: false }
-            : s,
-        ),
-      }));
-      await get().loadSessionMessages(sessionId);
+    /** PAG-2 §27.1:Export 独立全量 snapshot;完全不写 ChatStore */
+    async prepareMessagesForExport(sessionId) {
+      const session = get().sessions.find((s) => s.id === sessionId);
+      if (!session || session.draft || !session.loaded) {
+        throw new Error("会话尚未加载完成,无法导出");
+      }
+      const token = Symbol("export");
+      exportMessageRequestTokens.set(sessionId, token);
+      const tokenOwned = () =>
+        exportMessageRequestTokens.get(sessionId) === token;
+      try {
+        const pages: ChatMessage[][] = [];
+        let snapshotTotalCount = 0;
+        let cursor: string | null = null;
+        let firstPage = true;
+        while (true) {
+          const page = await listMessages(sessionId, {
+            limit: LATEST_MESSAGES_LIMIT,
+            cursor,
+          });
+          // 每页写 accumulator 前检查 token:Modal 已关 / session 重建 → 中止
+          if (!tokenOwned()) {
+            throw new Error("导出已取消");
+          }
+          if (firstPage) {
+            snapshotTotalCount = page.totalCount;
+            firstPage = false;
+          }
+          pages.push(page.items.map(toChatMessage));
+          if (page.nextCursor === null) break;
+          cursor = page.nextCursor;
+        }
+        // 页序 = 最新页在前;reverse 后按 position asc 拼接,同 id 去重
+        const accumulator: ChatMessage[] = [];
+        const seenIds = new Set<string>();
+        for (const pageItems of pages.slice().reverse()) {
+          for (const message of pageItems) {
+            if (seenIds.has(message.id)) continue;
+            seenIds.add(message.id);
+            accumulator.push(message);
+          }
+        }
+        if (accumulator.length !== snapshotTotalCount) {
+          throw new Error("导出快照不一致,请重试");
+        }
+        return accumulator;
+      } finally {
+        if (tokenOwned()) {
+          exportMessageRequestTokens.delete(sessionId);
+        }
+      }
     },
 
     selectSession(index: number) {
@@ -706,6 +1337,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       }
       // 正在看归档列表时,草稿必须落在「进行中」列表,否则会在下次 reloadList 时消失
       if (get().listStatus !== "ACTIVE") {
+        clearAllMessageRequestOwnership();
         set((state) => ({
           listStatus: "ACTIVE",
           ready: false,
@@ -762,6 +1394,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         );
         return { sessions, currentSessionIndex: next };
       });
+      clearMessageRequestOwnership(session.id);
       const current = get().sessions[get().currentSessionIndex];
       if (current) void get().loadSessionMessages(current.id);
       // PAG-REVIEW-10:删除 = authoritative invalidation,权威回第一页
@@ -787,6 +1420,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         );
         return { sessions, currentSessionIndex: next };
       });
+      clearMessageRequestOwnership(session.id);
       // PAG-REVIEW-10:归档 = authoritative invalidation,权威回第一页
       void get().reloadList();
     },
@@ -804,6 +1438,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       set((state) => ({
         sessions: state.sessions.filter((s) => s.id !== session.id),
       }));
+      clearMessageRequestOwnership(session.id);
       // PAG-REVIEW-10:恢复 = authoritative invalidation,权威回第一页
       void get().reloadList();
     },
@@ -862,6 +1497,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
      * 发送流程(§五):输入 → Conversation(草稿才建)→ POST messages
      * → requestId + assistantMessageId → SSE delta → 完成。
      * 上下文由后端 Gemini 会话负责,前端不再拼历史消息。
+     * PAG-2 §12.1:send 成功路径按 11 步 apply(第 1~10 步无 await)。
      */
     async onUserInput(content: string, attachImages?: string[]) {
       const text = content.trim();
@@ -881,8 +1517,8 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         return;
       }
 
-      // FIX-05:ensureConversation 会替换 draft,提前捕获偏好
-      const wasDraft = session.draft;
+      // REVIEW-26/35:入口只捕获草稿两项;chain 状态在 POST 返回后读 apply 时刻真值
+      const wasDraft = session.draft === true;
       const draftModelKey = wasDraft
         ? session.preferredModelKey ?? undefined
         : undefined;
@@ -895,8 +1531,8 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       );
       if (!conversationId) return;
 
-      const pending = get().sessions.find((s) => s.id === conversationId);
-      if (pending?.pendingRequestId) {
+      const existing = get().sessions.find((s) => s.id === conversationId);
+      if (existing?.pendingRequestId) {
         showToast(ERROR_TEXT.CONVERSATION_REQUEST_IN_PROGRESS);
         return;
       }
@@ -908,32 +1544,72 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           newIdempotencyKey(),
           draftModelKey,
         );
+
+        // §12.1 第 1 步:POST 返回后、写本地前重读 apply 时刻状态
+        const targetBeforeSendApply = get().sessions.find(
+          (s) => s.id === conversationId,
+        );
+        if (!targetBeforeSendApply) {
+          // 会话在 POST 在飞期间被删除:沿用现有生命周期处理
+          return;
+        }
+        // 第 2/3 步:同一时刻捕获 chain 与 pending
+        const chainWasEstablishedAtApply =
+          targetBeforeSendApply.loaded === true;
+        const pendingRequestIdAtApply = targetBeforeSendApply.pendingRequestId;
+
+        // 第 4 步:streaming 保持 toChatMessage 按 Backend status 推导,禁手工强制 true
         const userMessage = toChatMessage(result.userMessage);
         const assistantMessage = toChatMessage(result.assistantMessage);
-        assistantMessage.streaming = true;
-
-        get().updateTargetSession(
-          { id: conversationId } as ChatSession,
-          (target) => {
-            target.draft = false;
-            target.loaded = true;
-            target.messages = target.messages.concat([
-              userMessage,
-              assistantMessage,
-            ]);
-            target.lastUpdate = Date.now();
-            target.pendingRequestId = result.request.id;
-            if (draftModelKey !== undefined) {
-              target.preferredModelKey = draftModelKey;
-            }
-          },
+        // 第 5 步:id-upsert(禁 concat)
+        const nextMessages = applySendResultMessages(
+          targetBeforeSendApply.messages,
+          userMessage,
+          assistantMessage,
         );
-
-        get().followRequest(
-          conversationId,
-          result.request.id,
-          assistantMessage.id,
+        // 第 6 步:判定基于 merge 后 assistant,不是 POST 旧创建快照
+        const mergedAssistant = nextMessages.find(
+          (m) => m.id === result.assistantMessage.id,
+        )!;
+        // 第 7 步:S1/S2/S3 条件性 reconciliation
+        const reconciliation = reconcileSendRequestTracking(
+          pendingRequestIdAtApply,
+          result.request,
+          mergedAssistant,
         );
+        // 第 8 步:一次 Zustand update(loaded 不在此处置位,owner 是五分支)
+        set((state) => ({
+          sessions: state.sessions.map((s) =>
+            s.id === conversationId
+              ? {
+                  ...s,
+                  draft: false,
+                  messages: nextMessages,
+                  lastUpdate: Date.now(),
+                  pendingRequestId: reconciliation.nextPendingRequestId,
+                  ...(draftModelKey !== undefined
+                    ? { preferredModelKey: draftModelKey }
+                    : {}),
+                }
+              : s,
+          ),
+        }));
+
+        // 第 9 步:五分支(D/A1/A2/B/C)接管 loaded / totalCount / latest slot
+        handleLatestAfterSend(conversationId, {
+          wasDraft,
+          chainWasEstablishedAtApply,
+          assistantPosition: result.assistantMessage.position,
+        });
+        // 第 10 步:只有新发现需要追踪的 running Request 才 follow(恰 1 次)
+        if (reconciliation.shouldFollowRequest) {
+          get().followRequest(
+            conversationId,
+            result.request.id,
+            mergedAssistant.id,
+          );
+        }
+        // 第 11 步
         void get().reloadList();
       } catch (error) {
         notifyError(error);
@@ -1109,6 +1785,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
 
     async clearAllData() {
       closeAllStreams();
+      clearAllMessageRequestOwnership();
       await indexedDBStorage.clear();
       localStorage.clear();
       location.reload();

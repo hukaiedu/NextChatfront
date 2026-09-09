@@ -43,6 +43,10 @@ const cn = {
   },
   Chat: {
     SubTitle: (count: number) => `共 ${count} 条对话`,
+    HistoryLoading: "加载历史…",
+    HistoryError: "加载历史失败",
+    ExportPreparing: "正在准备导出…",
+    ExportFailed: "导出数据准备失败,请重试",
     ModelSelector: {
       Default: "默认模型",
       Unavailable: "当前模型不可用",

@@ -44,6 +44,10 @@ const en: LocaleType = {
   },
   Chat: {
     SubTitle: (count: number) => `${count} messages`,
+    HistoryLoading: "Loading history…",
+    HistoryError: "Failed to load history",
+    ExportPreparing: "Preparing export…",
+    ExportFailed: "Failed to prepare export data, please retry",
     ModelSelector: {
       Default: "Default model",
       Unavailable: "Current model unavailable",

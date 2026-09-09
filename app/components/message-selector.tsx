@@ -71,18 +71,26 @@ export function MessageSelector(props: {
   updateSelection: Updater<Set<string>>;
   defaultSelectAll?: boolean;
   onSelected?: (messages: ChatMessage[]) => void;
+  /** PAG-2 §27 REVIEW-16/24:传入时为 prepared full snapshot,行为与 fallback 不同 */
+  messages?: ChatMessage[];
 }) {
   const LATEST_COUNT = 4;
   const chatStore = useChatStore();
   const session = chatStore.currentSession();
   const isValid = (m: ChatMessage) => m.content && !m.isError && !m.streaming;
+  // REVIEW-24:props.messages(prepared full snapshot)不应用 session.clearContextIndex
+  // —— 它是当前局部 session.messages 的数组坐标,与 200 条全量快照不同语义;
+  // 仅 fallback(不传 messages)沿用现有数字切片
   const allMessages = useMemo(() => {
+    if (props.messages) {
+      return props.messages;
+    }
     let startIndex = Math.max(0, session.clearContextIndex ?? 0);
     if (startIndex === session.messages.length - 1) {
       startIndex = 0;
     }
     return session.messages.slice(startIndex);
-  }, [session.messages, session.clearContextIndex]);
+  }, [props.messages, session.messages, session.clearContextIndex]);
 
   const messages = useMemo(
     () =>

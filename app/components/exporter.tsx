@@ -40,7 +40,10 @@ const Markdown = dynamic(async () => (await import("./markdown")).Markdown, {
   loading: () => <LoadingIcon />,
 });
 
-export function ExportMessageModal(props: { onClose: () => void }) {
+export function ExportMessageModal(props: {
+  onClose: () => void;
+  messages: ChatMessage[];
+}) {
   return (
     <div className="modal-mask">
       <Modal
@@ -60,7 +63,7 @@ export function ExportMessageModal(props: { onClose: () => void }) {
         }
       >
         <div style={{ minHeight: "40vh" }}>
-          <MessageExporter />
+          <MessageExporter messages={props.messages} />
         </div>
       </Modal>
     </div>
@@ -132,7 +135,7 @@ function Steps<
   );
 }
 
-export function MessageExporter() {
+export function MessageExporter(props: { messages: ChatMessage[] }) {
   const steps = [
     {
       name: Locale.Export.Steps.Select,
@@ -162,16 +165,19 @@ export function MessageExporter() {
   const chatStore = useChatStore();
   const session = chatStore.currentSession();
   const { selection, updateSelection } = useMessageSelector();
+  // PAG-2 §27.1 REVIEW-24:Export 消息集合唯一来源 = props.messages(prepared
+  // full snapshot),禁止重新读取 session.messages;store 只提供元数据
+  const sourceMessages = props.messages;
   const selectedMessages = useMemo(() => {
     const ret: ChatMessage[] = [];
     if (exportConfig.includeContext) {
       ret.push(...session.mask.context);
     }
-    ret.push(...session.messages.filter((m) => selection.has(m.id)));
+    ret.push(...sourceMessages.filter((m) => selection.has(m.id)));
     return ret;
   }, [
     exportConfig.includeContext,
-    session.messages,
+    sourceMessages,
     session.mask.context,
     selection,
   ]);
@@ -238,6 +244,7 @@ export function MessageExporter() {
           </ListItem>
         </List>
         <MessageSelector
+          messages={props.messages}
           selection={selection}
           updateSelection={updateSelection}
           defaultSelectAll

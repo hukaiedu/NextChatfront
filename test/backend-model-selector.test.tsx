@@ -235,6 +235,10 @@ function seedSession(overrides: Partial<ChatSession> & { id: string }): ChatSess
     loaded: true,
     conversationStatus: "ACTIVE",
     preferredModelKey: null,
+    messageNextCursor: null,
+    loadingOlderMessages: false,
+    messageHistoryError: false,
+    messageTotalCount: 0,
     ...rest,
     id,
   };

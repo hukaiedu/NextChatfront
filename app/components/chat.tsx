@@ -4,6 +4,7 @@ import React, {
   RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -55,7 +56,7 @@ import Locale from "../locales";
 import { IconButton } from "./button";
 import styles from "./chat.module.scss";
 
-import { Modal, showPrompt } from "./ui-lib";
+import { Modal, showPrompt, showToast } from "./ui-lib";
 import { ModelSelectorButton } from "./model-selector";
 import { BrowserStatusButton } from "./browser-status";
 import { useNavigate } from "react-router-dom";
@@ -73,6 +74,33 @@ const localStorage = safeLocalStorage();
 const Markdown = dynamic(async () => (await import("./markdown")).Markdown, {
   loading: () => <LoadingIcon />,
 });
+
+/** PAG-2 §23.1:历史分页锚定状态机(废弃 shift-window,唯一 phase 集合) */
+export type PendingHistoryAnchor = {
+  sessionId: string;
+  requestedCursor: string;
+  oldFirstMessageId: string;
+  messageId: string;
+  relativeTop: number;
+  prependedCount: number;
+  phase: "awaiting-prepend" | "restore-anchor";
+};
+
+/**
+ * §23.1 锚定 ref 真正跨越 async loadOlderMessages 存活;模块级持有
+ * (_Chat 经 <_Chat key={session.id}> 同时仅一个实例,随重挂载整体销毁)
+ */
+export const pendingHistoryAnchorRef: {
+  current: PendingHistoryAnchor | null;
+} = { current: null };
+
+/**
+ * PAG2-FIX-01:冷启动 history window 初始化状态机。
+ * waiting=mount 时消息链未建,等 loaded;aligning=消息就绪,正把
+ * msgRenderIndex+DOM 对齐 latest window;ready=对齐完成,原 PAG-2 逻辑接管。
+ * 只描述本组件 incarnation 的首次初始化,ready 即终态,仅 remount 重来。
+ */
+type HistoryWindowInitPhase = "waiting" | "aligning" | "ready";
 
 function useSubmitHandler() {
   const config = useAppConfig();
@@ -266,13 +294,23 @@ function useScrollToBottom(
     }
   });
 
-  // auto scroll when messages length changes
+  // auto scroll when messages append(PAG-2 §24:length-effect 收窄为 append-only ——
+  // 判定:旧数组为空,或新数组首条 id 与旧数组首条 id 相同;prepend 历史不得拉底)
   const lastMessagesLength = useRef(messages.length);
+  const lastFirstMessageId = useRef(messages[0]?.id);
   useEffect(() => {
-    if (messages.length > lastMessagesLength.current && !detach) {
+    const appendedOnly =
+      lastMessagesLength.current === 0 ||
+      messages[0]?.id === lastFirstMessageId.current;
+    if (
+      messages.length > lastMessagesLength.current &&
+      appendedOnly &&
+      !detach
+    ) {
       scrollDomToBottom();
     }
     lastMessagesLength.current = messages.length;
+    lastFirstMessageId.current = messages[0]?.id;
   }, [messages.length, detach, scrollDomToBottom]);
 
   return {
@@ -595,6 +633,11 @@ function _Chat() {
     _setMsgRenderIndex(newIndex);
   }
 
+  // PAG2-FIX-01:已 loaded 的会话 mount(如 A→B→A)初始即 aligning;
+  // 冷启动(loaded=false)从 waiting 开始,等 store 建链
+  const [historyWindowInitPhase, setHistoryWindowInitPhase] =
+    useState<HistoryWindowInitPhase>(session.loaded ? "aligning" : "waiting");
+
   const messages = useMemo(() => {
     const endRenderIndex = Math.min(
       msgRenderIndex + 3 * CHAT_PAGE_SIZE,
@@ -602,6 +645,187 @@ function _Chat() {
     );
     return renderMessages.slice(msgRenderIndex, endRenderIndex);
   }, [msgRenderIndex, renderMessages]);
+
+  // PAG-2 §21:IO 回调读取镜像,七条件之四(msgRenderIndex===0)在触发时复核
+  const msgRenderIndexRef = useRef(msgRenderIndex);
+  msgRenderIndexRef.current = msgRenderIndex;
+
+  // PAG-2 §25:顶部三态 + 隐形 sentinel 的可见性(cursor!==null 是全部三态前提)
+  // PAG2-FIX-01:初始化未 ready 前不挂 sentinel/IO —— msgRenderIndex 尚未
+  // 对齐 latest window 时,即使七条件表面成立也不允许 history 分页启动
+  const hasHistoryMore =
+    !session.draft && session.loaded && session.messageNextCursor !== null;
+  const historySentinelVisible =
+    historyWindowInitPhase === "ready" &&
+    hasHistoryMore &&
+    msgRenderIndex === 0 &&
+    !session.loadingOlderMessages &&
+    !session.messageHistoryError;
+
+  // PAG-2 §23.2:IO / Retry 唯一写入口 —— 请求前写入 anchor,跨 async 存活
+  async function requestOlderMessages(fromRetry = false) {
+    const container = scrollRef.current;
+    if (!container) return;
+    const target = useChatStore
+      .getState()
+      .sessions.find((s) => s.id === session.id);
+    if (
+      !target ||
+      target.draft ||
+      !target.loaded ||
+      target.messageNextCursor === null ||
+      target.loadingOlderMessages
+    ) {
+      return;
+    }
+    if (!fromRetry && target.messageHistoryError) return;
+    if (msgRenderIndexRef.current !== 0) return;
+    const firstPersisted = target.messages.find(
+      (m) => m.position !== undefined,
+    );
+    if (!firstPersisted) return;
+    const anchorEl = container.querySelector(
+      `[data-message-id="${firstPersisted.id}"]`,
+    );
+    if (!anchorEl) return;
+    const anchor: PendingHistoryAnchor = {
+      sessionId: target.id,
+      requestedCursor: target.messageNextCursor,
+      oldFirstMessageId: firstPersisted.id,
+      messageId: firstPersisted.id,
+      relativeTop:
+        anchorEl.getBoundingClientRect().top -
+        container.getBoundingClientRect().top,
+      prependedCount: 0,
+      phase: "awaiting-prepend",
+    };
+    pendingHistoryAnchorRef.current = anchor;
+    const result = await useChatStore.getState().loadOlderMessages(target.id);
+    if (!result.applied || result.prependedCount === 0) {
+      // §23.4 一/二/六:失败/stale/guard no-op/空页;身份校验,不误清新一轮
+      if (pendingHistoryAnchorRef.current === anchor) {
+        pendingHistoryAnchorRef.current = null;
+      }
+    }
+  }
+
+  // PAG-2 §21:IntersectionObserver(root=.chat-body,顶部 300px 预载);
+  // sentinel 仅在七条件成立时渲染,msgRenderIndex>0 时窗口滑动零请求
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        void requestOlderMessages();
+      },
+      { root: scrollRef.current, rootMargin: "300px 0px 0px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historySentinelVisible]);
+
+  // PAG-2 §23.3:two-phase useLayoutEffect(每次 commit 都跑,由 phase 状态机驱动)
+  useLayoutEffect(() => {
+    const pending = pendingHistoryAnchorRef.current;
+    if (!pending || pending.sessionId !== session.id) return;
+    if (pending.phase === "awaiting-prepend") {
+      // Phase 1 唯一依据 = messages 本身(REVIEW-25),精确计算 prepend 数
+      const prependCount = session.messages
+        .filter((m) => m.position !== undefined)
+        .findIndex((m) => m.id === pending.oldFirstMessageId);
+      if (prependCount > 0) {
+        pending.prependedCount = prependCount;
+        pending.phase = "restore-anchor";
+        setMsgRenderIndex(msgRenderIndex + prependCount); // 主补偿 §22
+        return; // 本 commit 不做任何 DOM 修正
+      }
+      if (prependCount === -1) {
+        pendingHistoryAnchorRef.current = null; // §23.4 五:原链被 latest gap/reset 替换
+      }
+      // ===0:send append / SSE patch / loadOlder 仍在飞,Phase 1 不区分、无 UI 副作用
+      return;
+    }
+    // phase === "restore-anchor":第二次 commit,paint 前同步修正
+    const container = scrollRef.current;
+    if (!container) return;
+    const el = container.querySelector(
+      `[data-message-id="${pending.messageId}"]`,
+    );
+    if (el) {
+      const newRelativeTop =
+        el.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      container.scrollTop += newRelativeTop - pending.relativeTop;
+    } else {
+      // §23.4:anchor 不在窗口 → 降级,记日志,不做猜测性 scrollTop 修正
+      console.debug("[Chat] history anchor not in window", pending.messageId);
+    }
+    pendingHistoryAnchorRef.current = null;
+  });
+
+  // PAG2-FIX-01 Phase1:loaded 翻转后先以正确 msgRenderIndex 重新 commit 一次
+  // DOM;此处不做 history IO、不依赖 IntersectionObserver、不执行 loadOlder
+  useLayoutEffect(() => {
+    if (historyWindowInitPhase !== "waiting" || !session.loaded) return;
+    setMsgRenderIndex(Math.max(0, renderMessages.length - CHAT_PAGE_SIZE));
+    setHistoryWindowInitPhase("aligning");
+  });
+
+  // PAG2-FIX-01 Phase2:latest window 已 commit,对 .chat-body 做一次初始
+  // 贴底并打开 gate。ready 后不再重入,refresh/SSE/append/loadOlder 均无副作用
+  useLayoutEffect(() => {
+    if (historyWindowInitPhase !== "aligning") return;
+    const latestWindowIndex = Math.max(
+      0,
+      renderMessages.length - CHAT_PAGE_SIZE,
+    );
+    if (msgRenderIndex !== latestWindowIndex) {
+      // 对齐期间窗口又漂移(如 preview 气泡)→ 以当前 length 再对齐一次
+      setMsgRenderIndex(latestWindowIndex);
+      return;
+    }
+    const dom = scrollRef.current;
+    if (dom) {
+      dom.scrollTo(0, dom.scrollHeight);
+    }
+    setAutoScroll(true);
+    setHitBottom(true);
+    setHistoryWindowInitPhase("ready");
+  });
+
+  // PAG-2 §27.2 Header displayedCount 公式(REVIEW-14/17):
+  // draft / 未建链 → 本地可见条数(禁 0+2 冒充);建链 → totalCount + 本地 transient
+  const localTransientCount = session.messages.filter(
+    (m) => m.position === undefined,
+  ).length;
+  const historyTotalCount =
+    session.draft || !session.loaded
+      ? session.messages.length
+      : session.messageTotalCount + localTransientCount;
+
+  // PAG-2 §27.1 Export 独立 snapshot 接线:组件态持有 prepared snapshot,
+  // 不写回 ChatStore;preparingExport 期间按钮 disabled 防重复点击
+  const [preparingExport, setPreparingExport] = useState(false);
+  const [preparedExportMessages, setPreparedExportMessages] = useState<
+    ChatMessage[]
+  >([]);
+
+  async function onExport() {
+    if (preparingExport) return;
+    setPreparingExport(true);
+    try {
+      const snapshot = await chatStore.prepareMessagesForExport(session.id);
+      setPreparedExportMessages(snapshot);
+      setShowExport(true);
+    } catch (error) {
+      console.error("[Export] ", error);
+      showToast(Locale.Chat.ExportFailed);
+    } finally {
+      setPreparingExport(false);
+    }
+  }
 
   const onChatBodyScroll = (e: HTMLElement) => {
     const bottomHeight = e.scrollTop + e.clientHeight;
@@ -770,7 +994,7 @@ function _Chat() {
               {!session.topic ? getDefaultTopic() : session.topic}
             </div>
             <div className="window-header-sub-title">
-              {Locale.Chat.SubTitle(session.messages.length)}
+              {Locale.Chat.SubTitle(historyTotalCount)}
             </div>
           </div>
           <div className="window-actions">
@@ -820,9 +1044,8 @@ function _Chat() {
                 icon={<ExportIcon />}
                 bordered
                 title={Locale.Chat.Actions.Export}
-                onClick={() => {
-                  setShowExport(true);
-                }}
+                disabled={preparingExport}
+                onClick={() => void onExport()}
               />
             </div>
             {showMaxIcon && (
@@ -854,6 +1077,34 @@ function _Chat() {
                 setAutoScroll(false);
               }}
             >
+              {hasHistoryMore &&
+                (session.loadingOlderMessages ? (
+                  <div
+                    className={styles["chat-history-status"]}
+                    data-message-pagination-status="loading"
+                  >
+                    {Locale.Chat.HistoryLoading}
+                  </div>
+                ) : session.messageHistoryError ? (
+                  <div
+                    className={styles["chat-history-status"]}
+                    data-message-pagination-status="error"
+                  >
+                    <span>{Locale.Chat.HistoryError}</span>
+                    <button
+                      data-message-pagination-retry="older"
+                      onClick={() => void requestOlderMessages(true)}
+                    >
+                      {Locale.Chat.Actions.Retry}
+                    </button>
+                  </div>
+                ) : historySentinelVisible ? (
+                  <div
+                    ref={sentinelRef}
+                    className={styles["chat-history-sentinel"]}
+                    data-message-pagination-sentinel="true"
+                  />
+                ) : null)}
               {messages.map((message, i) => {
                 const isUser = message.role === "user";
                 const showActions =
@@ -869,6 +1120,7 @@ function _Chat() {
                           ? styles["chat-message-user"]
                           : styles["chat-message"]
                       }
+                      data-message-id={message.id}
                     >
                       <div className={styles["chat-message-container"]}>
                         <div className={styles["chat-message-header"]}>
@@ -1015,7 +1267,10 @@ function _Chat() {
         </div>
       </div>
       {showExport && (
-        <ExportMessageModal onClose={() => setShowExport(false)} />
+        <ExportMessageModal
+          messages={preparedExportMessages}
+          onClose={() => setShowExport(false)}
+        />
       )}
 
       {showShortcutKeyModal && (
