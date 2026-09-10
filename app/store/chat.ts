@@ -1,11 +1,21 @@
-import { safeLocalStorage, trimTopic } from "../utils";
+import {
+  getMessageImages,
+  getMessageTextContent,
+  safeLocalStorage,
+  trimTopic,
+} from "../utils";
 import { indexedDBStorage } from "@/app/utils/indexedDB-storage";
 import { nanoid } from "nanoid";
 import { create } from "zustand";
 import { showToast } from "../components/ui-lib";
 import { StoreKey } from "../constant";
 import Locale from "../locales";
-import type { MessageRole, RequestMessage } from "../client/api";
+import type {
+  MessageRole,
+  MultimodalContent,
+  RequestMessage,
+} from "../client/api";
+import type { PendingImage } from "../utils/attachment";
 import { ModelType } from "./config";
 import { createEmptyMask, Mask } from "./mask";
 import {
@@ -16,6 +26,7 @@ import {
   BackendRequest,
   ConversationStatus,
   RequestStatusFrame,
+  SendMessageResult,
   cancelRequest as cancelBackendRequest,
   createConversation,
   deleteConversation,
@@ -163,6 +174,13 @@ const ERROR_TEXT: Record<string, string> = {
   BROWSER_RESTART_CONFLICT: "有回答正在生成,请先停止生成再重启浏览器",
   BROWSER_RESTART_FAILED: "服务端浏览器重启失败,请查看后端日志",
   BROWSER_RESTART_TIMEOUT: "服务端浏览器重启超时,请稍后刷新状态",
+  // I3:附件六码(R32);VALIDATION_ERROR 不属于六码,保持既有通用处理
+  PAYLOAD_TOO_LARGE: "图片请求数据过大,请减少图片或缩小后重试",
+  ATTACHMENT_TOO_LARGE: "图片过大、数量过多或总大小超限",
+  UNSUPPORTED_ATTACHMENT_TYPE: "仅支持 PNG/JPEG/WebP/GIF",
+  ATTACHMENT_CAPACITY_EXCEEDED: "服务端附件队列已满,请稍后重试",
+  PROVIDER_ATTACHMENT_FAILED: "Gemini 图片上传失败,请重试",
+  PROVIDER_ATTACHMENT_TIMEOUT: "Gemini 图片上传超时,请重试",
   NETWORK_ERROR: "连不上后端服务",
 };
 
@@ -284,8 +302,78 @@ export function mergeFreshMessageWithLocal(
 }
 
 /**
+ * I3/M9:USER 图片注入的唯一实现 —— 正常发送路径与 Post-accept recovery 共用,
+ * 禁止复制两份组装代码。纯图(后端 content="")不放空 text part;
+ * 顺序 = pendingImages 顺序 = FileList 顺序(与后端顺序敏感 digest 一致)。
+ */
+function attachLocalImagesToUserMessage(
+  userMessage: ChatMessage,
+  pendingImages?: PendingImage[],
+): ChatMessage {
+  if (!pendingImages?.length) return userMessage;
+  const text = getMessageTextContent(userMessage);
+  return {
+    ...userMessage,
+    content: [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      ...pendingImages.map((im) => ({
+        type: "image_url" as const,
+        image_url: { url: im.dataUrl },
+      })),
+    ],
+  };
+}
+
+/**
+ * I3/M6:同 id USER fresh merge 的本地图片保全(纯函数)。
+ * 数据双源(M3):Backend fresh 是文本/status/position 权威,浏览器 ephemeral
+ * overlay 是页内 USER 图片的唯一来源。命中(same-id USER + local 有图)后以
+ * fresh 为基、按 local 顺序重挂 image_url;禁止写「[图片]」等伪 content。
+ * 非 USER / 异 id / local 无图 → 原样返回 fresh 引用(零开销直通)。
+ */
+export function preserveLocalUserImages(
+  fresh: ChatMessage,
+  local?: ChatMessage,
+): ChatMessage {
+  if (
+    fresh.role !== "user" ||
+    local?.role !== "user" ||
+    fresh.id !== local.id
+  ) {
+    return fresh;
+  }
+  const images = getMessageImages(local);
+  if (images.length === 0) return fresh;
+  const text = getMessageTextContent(fresh);
+  return {
+    ...fresh,
+    content: [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      ...images.map((url) => ({
+        type: "image_url" as const,
+        image_url: { url },
+      })),
+    ],
+  };
+}
+
+/**
+ * I3/M7:applyLatestPage 六分支组装完成后统一 overlay pass(唯一收口),
+ * 覆盖 bootstrap 同 id overlay / Case 0 重建 / Case 1 overlap / Case 2 gap rebuild;
+ * overlay 源 = current.messages(页面当前真相)。
+ */
+function preserveLocalUserImageOverlays(
+  fresh: ChatMessage[],
+  local: ChatMessage[],
+): ChatMessage[] {
+  const localById = new Map(local.map((m) => [m.id, m] as const));
+  return fresh.map((m) => preserveLocalUserImages(m, localById.get(m.id)));
+}
+
+/**
  * PAG-2:send result 落位唯一 helper(REVIEW-36 id-upsert,替代 concat):
- * USER 本地不存在 → append,同 id 已存在 → 不重复插入;
+ * USER 本地不存在 → append;同 id 已存在 → 纯文本 no-op,带图(I3/M1)以已存在的
+ * Backend fresh 为 base 叠加本次 image overlay(GET-before-POST 竞态不得吞图);
  * ASSISTANT 本地不存在 → 插入(streaming 保持 toChatMessage 按 Backend status 推导,
  * 禁手工强制 true),同 id 已存在 → 复用上方唯一合并规则,POST 初始 PENDING 快照
  * 不得覆盖 GET/SSE 已得到的较新状态。
@@ -296,8 +384,11 @@ export function applySendResultMessages(
   assistantMessage: ChatMessage,
 ): ChatMessage[] {
   const next = currentMessages.slice();
-  if (!next.some((m) => m.id === userMessage.id)) {
+  const userIndex = next.findIndex((m) => m.id === userMessage.id);
+  if (userIndex < 0) {
     next.push(userMessage);
+  } else if (getMessageImages(userMessage).length > 0) {
+    next[userIndex] = preserveLocalUserImages(next[userIndex]!, userMessage);
   }
   const assistantIndex = next.findIndex((m) => m.id === assistantMessage.id);
   if (assistantIndex < 0) {
@@ -466,7 +557,14 @@ interface ChatActions {
     updater: (session: ChatSession) => void,
   ): void;
   setLastInput(lastInput: string): void;
-  onUserInput(content: string, attachImages?: string[]): Promise<void>;
+  /**
+   * I3/R26:返回值 = acceptedByBackend —— true = Backend sendMessage 已成功返回
+   * (Request 已被后端接受);false = Backend 接受之前失败。不是 localApplyCompleted。
+   */
+  onUserInput(
+    content: string,
+    pendingImages?: PendingImage[],
+  ): Promise<boolean>;
   followRequest(
     conversationId: string,
     requestId: string,
@@ -575,6 +673,62 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         s.id === conversationId ? { ...s, pendingRequestId: requestId } : s,
       ),
     }));
+  }
+
+  /**
+   * I3/L5:accepted 后本地 tracking 建立失败的幂等恢复(chat.ts 内部 helper,不导出)。
+   * 用同一个 accepted POST result 重建 messages + pendingRequestId + 真 SSE;
+   * 顺序 = 先 id-upsert USER/ASSISTANT(SSE patch 的 assistant 必须先存在,L6)→
+   * 再 pending → 再 followRequest(恰 1 条新订阅)。不重跑 11 步:
+   * handleLatestAfterSend / totalCount / reloadList 由后续 eventual refresh 校准(L7)。
+   * ① ② 对两类注入点(set 前 / set 后 follow 前)都安全幂等(K6)。
+   */
+  function recoverAcceptedSendTracking(
+    conversationId: string,
+    result: SendMessageResult,
+    pendingImages?: PendingImage[],
+  ): void {
+    closeStream(conversationId);
+    setPendingRequest(conversationId, undefined);
+    const current = get().sessions.find((s) => s.id === conversationId);
+    if (!current) return;
+    const userMessage = attachLocalImagesToUserMessage(
+      toChatMessage(result.userMessage),
+      pendingImages,
+    );
+    const assistantMessage = toChatMessage(result.assistantMessage);
+    const nextMessages = applySendResultMessages(
+      current.messages,
+      userMessage,
+      assistantMessage,
+    );
+    const mergedAssistant = nextMessages.find(
+      (m) => m.id === result.assistantMessage.id,
+    )!;
+    // 唯一 send-side 判据:currentPending 必为 undefined(② 刚清空),禁止手写 status 判断
+    const reconciliation = reconcileSendRequestTracking(
+      undefined,
+      result.request,
+      mergedAssistant,
+    );
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === conversationId
+          ? {
+              ...s,
+              messages: nextMessages,
+              pendingRequestId: reconciliation.nextPendingRequestId,
+            }
+          : s,
+      ),
+    }));
+    if (reconciliation.shouldFollowRequest) {
+      get().followRequest(
+        conversationId,
+        result.request.id,
+        mergedAssistant.id,
+      );
+    }
   }
 
   /** 草稿会话在第一次发送时才真正建到后端 */
@@ -802,6 +956,13 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         }
       }
     }
+
+    // I3/M7:同 id USER 本地图片 overlay 保全 —— 六分支组装完成后、进入
+    // reconcileLatestPendingRequest 之前统一过一遍;ASSISTANT PAG-2 merge 不受影响
+    nextMessages = preserveLocalUserImageOverlays(
+      nextMessages,
+      current.messages,
+    );
 
     const hadPending = current.pendingRequestId !== undefined;
     const reconciliation = reconcileLatestPendingRequest(
@@ -1528,14 +1689,14 @@ export const useChatStore = create<ChatStore>()((set, get) => {
      * → requestId + assistantMessageId → SSE delta → 完成。
      * 上下文由后端 Gemini 会话负责,前端不再拼历史消息。
      * PAG-2 §12.1:send 成功路径按 11 步 apply(第 1~10 步无 await)。
+     * I3/R26:返回值 = acceptedByBackend;accepted 边界紧随 sendMessage 成功,
+     * 此后任何纯前端异常都不得使本次调用报告「未发送」(INV-ACCEPT-01);
+     * accepted 后本地异常走 canonical reset + acceptedResult 幂等 recovery +
+     * eventual refresh(J/K/L),不落「发送失败」气泡(J3)。
      */
-    async onUserInput(content: string, attachImages?: string[]) {
+    async onUserInput(content: string, pendingImages?: PendingImage[]) {
       const text = content.trim();
-      if (!text) return;
-      if (attachImages?.length) {
-        showToast(ERROR_TEXT.PROVIDER_BUSY);
-        return;
-      }
+      if (!text && !pendingImages?.length) return false;
 
       let session = get().currentSession();
       if (session === getPlaceholderSession()) {
@@ -1544,7 +1705,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
       }
       if (session.conversationStatus === "ARCHIVED") {
         showToast(ERROR_TEXT.CONVERSATION_ARCHIVED);
-        return;
+        return false;
       }
 
       // REVIEW-26/35:入口只捕获草稿两项;chain 状态在 POST 返回后读 apply 时刻真值
@@ -1559,13 +1720,25 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           return null;
         },
       );
-      if (!conversationId) return;
+      if (!conversationId) return false;
 
       const existing = get().sessions.find((s) => s.id === conversationId);
       if (existing?.pendingRequestId) {
         showToast(ERROR_TEXT.CONVERSATION_REQUEST_IN_PROGRESS);
-        return;
+        return false;
       }
+
+      const attachments = pendingImages?.length
+        ? pendingImages.map((im) => ({
+            name: im.name,
+            mimeType: im.mimeType,
+            data: im.dataUrl,
+          }))
+        : undefined;
+
+      // INV-ACCEPT-01:sendMessage 成功返回即 accepted,此后本次调用绝不回退
+      let acceptedByBackend = false;
+      let acceptedResult: SendMessageResult | undefined;
 
       try {
         const result = await sendMessage(
@@ -1573,25 +1746,34 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           text,
           newIdempotencyKey(),
           draftModelKey,
+          attachments,
         );
+        // I3/L3:accepted 边界 —— 从这一行起本次调用绝不能再报告「未发送」
+        acceptedResult = result;
+        acceptedByBackend = true;
 
         // §12.1 第 1 步:POST 返回后、写本地前重读 apply 时刻状态
         const targetBeforeSendApply = get().sessions.find(
           (s) => s.id === conversationId,
         );
         if (!targetBeforeSendApply) {
-          // 会话在 POST 在飞期间被删除:沿用现有生命周期处理
-          return;
+          // 会话在 POST 在飞期间被删除:Request 已存在,按边界返回 true
+          // (外层 epoch 守卫自会处理已删除会话的清理归属;R26)
+          return true;
         }
         // 第 2/3 步:同一时刻捕获 chain 与 pending
         const chainWasEstablishedAtApply =
           targetBeforeSendApply.loaded === true;
         const pendingRequestIdAtApply = targetBeforeSendApply.pendingRequestId;
 
-        // 第 4 步:streaming 保持 toChatMessage 按 Backend status 推导,禁手工强制 true
-        const userMessage = toChatMessage(result.userMessage);
+        // 第 4 步:streaming 保持 toChatMessage 按 Backend status 推导,禁手工强制 true;
+        // USER 图片经共享注入函数(M9),纯图 content="" 不放空 text part
+        const userMessage = attachLocalImagesToUserMessage(
+          toChatMessage(result.userMessage),
+          pendingImages,
+        );
         const assistantMessage = toChatMessage(result.assistantMessage);
-        // 第 5 步:id-upsert(禁 concat)
+        // 第 5 步:id-upsert(禁 concat;同 id USER 带图替换,M1)
         const nextMessages = applySendResultMessages(
           targetBeforeSendApply.messages,
           userMessage,
@@ -1641,25 +1823,46 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         }
         // 第 11 步
         void get().reloadList();
+        return true;
       } catch (error) {
+        if (!acceptedByBackend || !acceptedResult) {
+          // 阶段 A:Backend 未接受 → 现有同步失败呈现,pending 保留可重试
+          notifyError(error);
+          get().updateTargetSession(
+            { id: conversationId } as ChatSession,
+            (target) => {
+              target.messages = target.messages.concat(
+                createMessage({
+                  role: "assistant",
+                  content: "",
+                  isError: true,
+                  errorCode:
+                    error instanceof BackendApiError
+                      ? error.code
+                      : "NETWORK_ERROR",
+                  model: BACKEND_MODEL_LABEL,
+                }),
+              );
+            },
+          );
+          return false;
+        }
+        // 阶段 B:accepted 后本地异常(J2/J3)—— 只提示本地异常,不落「发送失败」气泡
         notifyError(error);
-        get().updateTargetSession(
-          { id: conversationId } as ChatSession,
-          (target) => {
-            target.messages = target.messages.concat(
-              createMessage({
-                role: "assistant",
-                content: "",
-                isError: true,
-                errorCode:
-                  error instanceof BackendApiError
-                    ? error.code
-                    : "NETWORK_ERROR",
-                model: BACKEND_MODEL_LABEL,
-              }),
-            );
-          },
-        );
+        try {
+          // canonical reset(close + clear,K2)在 helper 内;acceptedResult
+          // 幂等 recovery —— pendingRequestId 与真 SSE 在返回前建立(L4/L5)
+          recoverAcceptedSendTracking(
+            conversationId,
+            acceptedResult,
+            pendingImages,
+          );
+        } catch (recoveryError) {
+          notifyError(recoveryError); // L8:双重前端故障降级,accepted 仍不回退
+        }
+        // L4:eventual 权威校准 —— 不 await、不承担 submitting gate 完成判据
+        void get().refreshSessionMessages(conversationId);
+        return true;
       }
     },
 

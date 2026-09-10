@@ -42,6 +42,13 @@
   }
 }
 
+/* I3/R25:触摸端无 hover,托盘删除按钮常显 */
+@media only screen and (max-width: 600px) {
+  .attach-image .attach-image-mask {
+    opacity: 1;
+  }
+}
+
 .chat-input-actions {
   display: flex;
   flex-wrap: wrap;

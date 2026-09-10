@@ -130,6 +130,13 @@ export interface SendMessageResult {
   deduplicated: boolean;
 }
 
+/** I3:POST /messages 附件项(data = 图片 dataURL,字节只在请求体内存活) */
+export interface SendMessageAttachment {
+  name: string;
+  mimeType: string;
+  data: string;
+}
+
 /** 后端统一错误信封 `{ error: { code, message, requestId } }` */
 export class BackendApiError extends Error {
   constructor(
@@ -337,6 +344,7 @@ export function sendMessage(
   content: string,
   idempotencyKey: string,
   modelKey?: string,
+  attachments?: SendMessageAttachment[],
 ): Promise<SendMessageResult> {
   return call<SendMessageResult>(
     `/conversations/${encodeURIComponent(conversationId)}/messages`,
@@ -345,6 +353,8 @@ export function sendMessage(
       body: {
         content,
         ...(modelKey !== undefined ? { modelKey } : {}),
+        // I3:无附件(含 [])一律缺省字段,与旧纯文本请求逐字节兼容
+        ...(attachments?.length ? { attachments } : {}),
       },
       headers: { "Idempotency-Key": idempotencyKey },
     },

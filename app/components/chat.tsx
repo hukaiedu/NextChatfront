@@ -29,6 +29,8 @@ import AutoIcon from "../icons/auto.svg";
 import BottomIcon from "../icons/bottom.svg";
 import ShortcutkeyIcon from "../icons/shortcutkey.svg";
 import ArchiveIcon from "../icons/archive.svg";
+import ImageIcon from "../icons/image.svg";
+import DeleteIcon from "../icons/clear.svg";
 import {
   ChatMessage,
   createMessage,
@@ -43,10 +45,20 @@ import {
 import {
   autoGrowTextArea,
   copyToClipboard,
+  getMessageImages,
   getMessageTextContent,
   safeLocalStorage,
   useMobileScreen,
 } from "../utils";
+
+import {
+  ATTACHMENT_ACCEPT,
+  ATTACHMENT_MAX_COUNT,
+  ATTACHMENT_TOTAL_MAX_FINAL_BYTES,
+  AttachmentPrepareError,
+  PendingImage,
+  prepareAttachment,
+} from "../utils/attachment";
 
 import dynamic from "next/dynamic";
 
@@ -56,7 +68,7 @@ import Locale from "../locales";
 import { IconButton } from "./button";
 import styles from "./chat.module.scss";
 
-import { Modal, showPrompt, showToast } from "./ui-lib";
+import { Modal, showImageModal, showPrompt, showToast } from "./ui-lib";
 import { ModelSelectorButton } from "./model-selector";
 import { BrowserStatusButton } from "./browser-status";
 import { useNavigate } from "react-router-dom";
@@ -326,6 +338,9 @@ export function ChatActions(props: {
   showPromptHints: () => void;
   hitBottom: boolean;
   setShowShortcutKeyModal: React.Dispatch<React.SetStateAction<boolean>>;
+  uploadImage?: () => void;
+  uploadDisabled?: boolean;
+  uploadInProgress?: boolean;
 }) {
   const config = useAppConfig();
 
@@ -345,6 +360,20 @@ export function ChatActions(props: {
   return (
     <div className={styles["chat-input-actions"]}>
       <>
+        {props.uploadImage && (
+          <ChatAction
+            onClick={() => {
+              if (props.uploadDisabled) return;
+              props.uploadImage?.();
+            }}
+            text={
+              props.uploadInProgress
+                ? Locale.Chat.ImagePreparing
+                : Locale.Chat.InputActions.UploadImage
+            }
+            icon={<ImageIcon />}
+          />
+        )}
         {!props.hitBottom && (
           <ChatAction
             onClick={props.scrollToBottom}
@@ -447,7 +476,28 @@ export function ShortcutKeyModal(props: { onClose: () => void }) {
   );
 }
 
-function _Chat() {
+/**
+ * I3/H1:附件 owner 身份(区分 PROMOTION / SWITCH,禁止只靠 [session.id])。
+ * 状态全部放外层 Chat(keyed _Chat 之外),经 props 传给 _Chat。
+ */
+type AttachmentOwner = {
+  sessionId: string;
+  currentSessionIndex: number;
+  wasDraft: boolean;
+};
+
+/** I3:outer Chat → _Chat 的附件 composer props 组(H1;gate/epoch 全在 outer 实现) */
+export type AttachmentController = {
+  pendingImages: PendingImage[];
+  isPreparingImages: boolean;
+  isSubmittingMessage: boolean;
+  addFiles: (files: FileList | File[]) => void;
+  removeAt: (id: string) => void;
+  submit: (text: string) => void;
+};
+
+function _Chat(props: { attachment: AttachmentController }) {
+  const attachment = props.attachment;
   type RenderMessage = ChatMessage & { preview?: boolean };
 
   const chatStore = useChatStore();
@@ -459,6 +509,7 @@ function _Chat() {
   const [showExport, setShowExport] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [userInput, setUserInput] = useState("");
   const { submitKey, shouldSubmit } = useSubmitHandler();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -555,15 +606,23 @@ function _Chat() {
   };
 
   const doSubmit = (userInput: string) => {
-    if (userInput.trim() === "") return;
-    const matchCommand = chatCommands.match(userInput);
-    if (matchCommand.matched) {
-      setUserInput("");
-      setPromptHints([]);
-      matchCommand.invoke();
+    // I3/R23:准备中 / POST 在途守卫(真拦截在 outer submit 的 submittingRef);
+    // 联合判据:文本 ∨ 附件至少一个(纯图 content="")
+    if (attachment.isPreparingImages) return;
+    if (attachment.isSubmittingMessage) return;
+    if (userInput.trim() === "" && attachment.pendingImages.length === 0)
       return;
+    // §39:command 仅在文本非空时尝试(纯图不得进入 command parser,现序不变)
+    if (userInput.trim() !== "") {
+      const matchCommand = chatCommands.match(userInput);
+      if (matchCommand.matched) {
+        setUserInput("");
+        setPromptHints([]);
+        matchCommand.invoke();
+        return;
+      }
     }
-    chatStore.onUserInput(userInput);
+    attachment.submit(userInput);
     chatStore.setLastInput(userInput);
     setUserInput("");
     setPromptHints([]);
@@ -1107,6 +1166,7 @@ function _Chat() {
                 ) : null)}
               {messages.map((message, i) => {
                 const isUser = message.role === "user";
+                const messageImages = getMessageImages(message);
                 const showActions =
                   i > 0 &&
                   !(message.preview || message.content.length === 0) &&
@@ -1184,6 +1244,36 @@ function _Chat() {
                             parentRef={scrollRef}
                             defaultShow={i >= messages.length - 6}
                           />
+                          {messageImages.length > 0 &&
+                            (messageImages.length === 1 ? (
+                              <img
+                                className={styles["chat-message-item-image"]}
+                                src={messageImages[0]}
+                                alt=""
+                                onClick={() => showImageModal(messageImages[0])}
+                              />
+                            ) : (
+                              <div
+                                className={styles["chat-message-item-images"]}
+                                style={
+                                  {
+                                    "--image-count": messageImages.length,
+                                  } as React.CSSProperties
+                                }
+                              >
+                                {messageImages.map((image, imageIndex) => (
+                                  <img
+                                    className={
+                                      styles["chat-message-item-image-multi"]
+                                    }
+                                    src={image}
+                                    key={imageIndex}
+                                    alt=""
+                                    onClick={() => showImageModal(image)}
+                                  />
+                                ))}
+                              </div>
+                            ))}
                           {message.isError && (
                             <div className={styles["chat-message-error"]}>
                               {errorTextForCode(message.errorCode)}
@@ -1221,11 +1311,63 @@ function _Chat() {
                   onSearch("");
                 }}
                 setShowShortcutKeyModal={setShowShortcutKeyModal}
+                uploadImage={() => fileInputRef.current?.click()}
+                uploadDisabled={
+                  attachment.isPreparingImages ||
+                  attachment.isSubmittingMessage ||
+                  session.pendingRequestId !== undefined
+                }
+                uploadInProgress={attachment.isPreparingImages}
+              />
+              <input
+                ref={fileInputRef}
+                type="file"
+                hidden
+                multiple
+                accept={ATTACHMENT_ACCEPT}
+                onChange={(e) => {
+                  if (e.currentTarget.files?.length) {
+                    attachment.addFiles(e.currentTarget.files);
+                  }
+                  e.currentTarget.value = "";
+                }}
               />
               <label
-                className={styles["chat-input-panel-inner"]}
+                className={clsx(
+                  styles["chat-input-panel-inner"],
+                  attachment.pendingImages.length > 0 &&
+                    styles["chat-input-panel-inner-attach"],
+                )}
                 htmlFor="chat-input"
               >
+                {attachment.pendingImages.length > 0 && (
+                  <div className={styles["attach-images"]}>
+                    {attachment.pendingImages.map((image) => (
+                      <div
+                        key={image.id}
+                        className={styles["attach-image"]}
+                        style={{ backgroundImage: `url(${image.dataUrl})` }}
+                        onClick={() => showImageModal(image.dataUrl)}
+                      >
+                        <div className={styles["attach-image-mask"]}>
+                          <DeleteIcon
+                            className={styles["delete-image"]}
+                            role="button"
+                            aria-label={Locale.Chat.Actions.Delete}
+                            aria-disabled={
+                              attachment.isSubmittingMessage || undefined
+                            }
+                            onClick={(e: React.MouseEvent) => {
+                              e.stopPropagation();
+                              if (attachment.isSubmittingMessage) return;
+                              attachment.removeAt(image.id);
+                            }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <textarea
                   id="chat-input"
                   ref={inputRef}
@@ -1258,6 +1400,10 @@ function _Chat() {
                     text={Locale.Chat.Send}
                     className={styles["chat-input-send"]}
                     type="primary"
+                    disabled={
+                      attachment.isPreparingImages ||
+                      attachment.isSubmittingMessage
+                    }
                     onClick={() => doSubmit(userInput)}
                   />
                 )}
@@ -1280,8 +1426,148 @@ function _Chat() {
   );
 }
 
+/**
+ * I3/H1:附件 ephemeral 状态全部住在本组件(keyed `_Chat` 之外),
+ * 草稿首发导致的 `_Chat` remount 不清 pending/preparing/submitting;
+ * 真切换会话由 owner transition classifier 作废(R35)。
+ */
 export function Chat() {
   const chatStore = useChatStore();
   const session = chatStore.currentSession();
-  return <_Chat key={session.id}></_Chat>;
+
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [isPreparingImages, setIsPreparingImages] = useState(false);
+  const [isSubmittingMessage, setIsSubmittingMessage] = useState(false);
+  const attachmentEpochRef = useRef(0);
+  const submittingRef = useRef(false);
+  const attachmentOwnerRef = useRef<AttachmentOwner | null>(null);
+
+  // H3/H4:owner transition —— SAME/PROMOTION 保留,SWITCH 才 invalidate
+  useEffect(() => {
+    const owner: AttachmentOwner = {
+      sessionId: session.id,
+      currentSessionIndex: chatStore.currentSessionIndex,
+      wasDraft: session.draft === true,
+    };
+    const prev = attachmentOwnerRef.current;
+    attachmentOwnerRef.current = owner;
+
+    if (prev === null) return;
+    if (prev.sessionId === owner.sessionId) return;
+
+    const isPromotion =
+      prev.wasDraft === true &&
+      owner.wasDraft === false &&
+      prev.sessionId.startsWith("draft-") &&
+      !owner.sessionId.startsWith("draft-") &&
+      prev.currentSessionIndex === owner.currentSessionIndex;
+    if (isPromotion) return;
+
+    attachmentEpochRef.current += 1;
+    setPendingImages([]);
+    setIsPreparingImages(false);
+    setIsSubmittingMessage(false);
+    submittingRef.current = false;
+  }, [session.id, session.draft, chatStore.currentSessionIndex]);
+
+  // 外层 Chat 卸载:作废晚到的 prepare/submit continuation(仅挂载周期一次)
+  useEffect(
+    () => () => {
+      attachmentEpochRef.current += 1;
+    },
+    [],
+  );
+
+  const addFiles = useCallback(
+    async (files: FileList | File[]) => {
+      if (isPreparingImages || submittingRef.current) return;
+      const list = Array.from(files);
+      if (list.length === 0) return;
+      const capturedEpoch = attachmentEpochRef.current;
+      const baseCount = pendingImages.length;
+      const baseTotal = pendingImages.reduce((sum, im) => sum + im.bytes, 0);
+      let addedCount = 0;
+      let addedBytes = 0;
+      setIsPreparingImages(true);
+      try {
+        // 串行 for…of:严格 FileList 顺序(= 后端 digest 顺序),禁并行 canvas
+        for (const file of list) {
+          try {
+            const image = await prepareAttachment(file);
+            if (capturedEpoch !== attachmentEpochRef.current) return;
+            if (baseCount + addedCount >= ATTACHMENT_MAX_COUNT) {
+              showToast(Locale.Chat.ImageCountExceeded);
+              break;
+            }
+            if (
+              baseTotal + addedBytes + image.bytes >
+              ATTACHMENT_TOTAL_MAX_FINAL_BYTES
+            ) {
+              showToast(Locale.Chat.ImageTotalExceeded);
+              continue;
+            }
+            addedCount += 1;
+            addedBytes += image.bytes;
+            setPendingImages((prev) => [...prev, image]);
+          } catch (error) {
+            // R28:单张本地失败只拒绝该张,批次继续,已成功项保留
+            showToast(
+              Locale.Chat[
+                error instanceof AttachmentPrepareError
+                  ? error.reason
+                  : "ImageReadFailed"
+              ],
+            );
+          }
+        }
+      } finally {
+        if (capturedEpoch === attachmentEpochRef.current) {
+          setIsPreparingImages(false);
+        }
+      }
+    },
+    [isPreparingImages, pendingImages],
+  );
+
+  const removeAt = useCallback((id: string) => {
+    setPendingImages((prev) => prev.filter((image) => image.id !== id));
+  }, []);
+
+  const submit = useCallback(
+    (text: string) => {
+      if (isPreparingImages || submittingRef.current) return;
+      if (text.trim() === "" && pendingImages.length === 0) return;
+      const snapshot = pendingImages;
+      const epochAtSend = attachmentEpochRef.current;
+      submittingRef.current = true; // 先 ref(同步拦双击,G1)
+      setIsSubmittingMessage(true); // 再 state(驱动 disabled)
+      void chatStore
+        .onUserInput(text, snapshot)
+        .then((accepted) => {
+          if (!accepted) return; // Backend 未接受 → 保留 pending 可重试
+          if (epochAtSend !== attachmentEpochRef.current) return;
+          setPendingImages([]);
+        })
+        .finally(() => {
+          if (epochAtSend !== attachmentEpochRef.current) return;
+          submittingRef.current = false;
+          setIsSubmittingMessage(false); // → session.pendingRequestId 接管 Stop
+        });
+    },
+    [chatStore, isPreparingImages, pendingImages],
+  );
+
+  return (
+    <_Chat
+      key={session.id}
+      attachment={{
+        pendingImages,
+        isPreparingImages,
+        isSubmittingMessage,
+        addFiles,
+        removeAt,
+        submit,
+      }}
+    ></_Chat>
+  );
 }

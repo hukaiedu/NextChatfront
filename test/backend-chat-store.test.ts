@@ -20,8 +20,11 @@ import type {
   BackendMessage,
   BackendMessageRole,
   BackendRequest,
+  BackendRequestBrief,
   ConversationStatus,
 } from "../app/client/backend-api";
+import type { PendingImage } from "../app/utils/attachment";
+import { getMessageImages, getMessageTextContent } from "../app/utils";
 
 /**
  * 第 7 阶段验收用例(§十一)。
@@ -4381,5 +4384,786 @@ describe("PAG-2:Message 历史分页(设计 §二十九 store 矩阵)", () => {
     expect(FakeEventSource.instances).toHaveLength(0); // follow = 0
     expect(session.messageTotalCount).toBe(202);
     expect(positionsOf("c-1")).toEqual(seq(151, 202));
+  });
+});
+
+describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图片 overlay)", () => {
+  const IMG_A = "data:image/png;base64,AAAA";
+  const IMG_B = "data:image/gif;base64,BBBB";
+  const IMG_C = "data:image/jpeg;base64,CCCC";
+  const IMG_D = "data:image/webp;base64,DDDD";
+
+  const pendingImage = (
+    name: string,
+    mimeType: PendingImage["mimeType"],
+    dataUrl: string,
+  ): PendingImage => ({ id: `p-${name}`, name, mimeType, dataUrl, bytes: 3 });
+
+  const imageA = pendingImage("a.png", "image/png", IMG_A);
+  const imageB = pendingImage("b.gif", "image/gif", IMG_B);
+  const imageC = pendingImage("c.jpg", "image/jpeg", IMG_C);
+  const imageD = pendingImage("d.webp", "image/webp", IMG_D);
+
+  const sessionOf = (id: string) => {
+    const session = useChatStore.getState().sessions.find((s) => s.id === id);
+    if (!session) throw new Error(`session ${id} 不存在`);
+    return session;
+  };
+  const usersOf = (id: string) =>
+    sessionOf(id).messages.filter((m) => m.role === "user");
+  const assistantsOf = (id: string) =>
+    sessionOf(id).messages.filter((m) => m.role === "assistant");
+  const sendCalls = () =>
+    calls.filter(
+      (c) => c.method === "POST" && /\/backend-api\/conversations\/[^/]+\/messages$/.test(c.url),
+    );
+  const activeStreams = () => FakeEventSource.instances.filter((s) => !s.closed);
+  const flush = async () => {
+    for (let i = 0; i < 4; i += 1) await tick();
+  };
+
+  /** 注入「首次访问 status 即抛」的 request:第一次触发点 = apply 的 reconcile(先于 set) */
+  function throwOnceOnRequestStatus<T extends { status: string }>(
+    requestItem: T,
+  ): T {
+    const original = requestItem.status;
+    let armed = true;
+    Object.defineProperty(requestItem, "status", {
+      configurable: true,
+      get() {
+        if (armed) {
+          armed = false;
+          throw new Error("injected-A: request.status");
+        }
+        return original;
+      },
+    });
+    return requestItem;
+  }
+
+  function throwTimesOnRequestStatus<T extends { status: string }>(
+    requestItem: T,
+    times: number,
+  ): T {
+    const original = requestItem.status;
+    let remaining = times;
+    Object.defineProperty(requestItem, "status", {
+      configurable: true,
+      get() {
+        if (remaining > 0) {
+          remaining -= 1;
+          throw new Error("injected-A: request.status");
+        }
+        return original;
+      },
+    });
+    return requestItem;
+  }
+
+  async function bootstrapConversation(id = "c-1", seeded = 0) {
+    server.conversations = [conversation(id, `${id} 会话`)];
+    server.messages.set(id, []);
+    if (seeded > 0) seedMessages(id, seeded);
+    await useChatStore.getState().bootstrap();
+    await tick();
+  }
+
+  function setSessionMessages(id: string, messages: ChatSession["messages"]) {
+    useChatStore.setState((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === id ? { ...s, messages } : s,
+      ),
+    }));
+  }
+
+  /** 从 fake 后端事务产出的 pair 取真实 id/position(注入响应时保持 id 一致) */
+  function committedPair(id: string) {
+    const stored = server.messages.get(id)!;
+    const userMessage = stored.filter((m) => m.role === "USER").at(-1)!;
+    const assistantMessage = stored
+      .filter((m) => m.role === "ASSISTANT")
+      .at(-1)!;
+    const requestId = assistantMessage.request!.id;
+    return { userMessage, assistantMessage, requestId };
+  }
+
+  function sendResult(
+    userMessage: BackendMessage,
+    assistantMessage: BackendMessage,
+    // brief 与完整 Request 都允许:假后端原样回显,store 只读 id/status
+    requestItem: BackendRequest | BackendRequestBrief,
+  ) {
+    return reply(201, {
+      data: {
+        request: requestItem,
+        userMessage,
+        assistantMessage,
+        deduplicated: false,
+      },
+    });
+  }
+
+  test("I3-SEND-01 纯图可发:content=\"\" + attachments,注入无空 text part", async () => {
+    await bootstrapConversation("c-1", 0);
+
+    const accepted = await useChatStore.getState().onUserInput("", [imageA]);
+    await flush();
+
+    expect(accepted).toBe(true);
+    const [post] = sendCalls();
+    expect(post.body.content).toBe("");
+    expect(post.body.attachments).toEqual([
+      { name: "a.png", mimeType: "image/png", data: IMG_A },
+    ]);
+
+    const session = sessionOf("c-1");
+    expect(session.pendingRequestId).toBe("req-1");
+    expect(session.messages).toHaveLength(2);
+    const user = usersOf("c-1")[0];
+    expect(user.content).toEqual([
+      { type: "image_url", image_url: { url: IMG_A } },
+    ]);
+    expect(assistantsOf("c-1")).toHaveLength(1);
+    // SSE:恰 1 条活动订阅,指向本次 request
+    expect(activeStreams()).toHaveLength(1);
+    expect(activeStreams()[0].url).toContain("/backend-api/requests/req-1/events");
+  });
+
+  test("I3-SEND-02 文本+图:payload 与注入都保留文本与图片顺序", async () => {
+    await bootstrapConversation("c-1", 2);
+
+    const accepted = await useChatStore
+      .getState()
+      .onUserInput("看图", [imageA, imageB]);
+    await flush();
+
+    expect(accepted).toBe(true);
+    const [post] = sendCalls();
+    expect(post.body.content).toBe("看图");
+    expect(post.body.attachments).toEqual([
+      { name: "a.png", mimeType: "image/png", data: IMG_A },
+      { name: "b.gif", mimeType: "image/gif", data: IMG_B },
+    ]);
+    const user = usersOf("c-1").at(-1)!;
+    expect(user.content).toEqual([
+      { type: "text", text: "看图" },
+      { type: "image_url", image_url: { url: IMG_A } },
+      { type: "image_url", image_url: { url: IMG_B } },
+    ]);
+  });
+
+  test("I3-SEND-03 无文本无图仍返回 false,且不发 POST", async () => {
+    await bootstrapConversation("c-1", 2);
+
+    expect(await useChatStore.getState().onUserInput("   ", [])).toBe(false);
+    expect(await useChatStore.getState().onUserInput("", [])).toBe(false);
+    expect(sendCalls()).toHaveLength(0);
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  test("I3-SEND-04 attachments 形状/顺序=队列顺序,Idempotency-Key 每次一个新值", async () => {
+    await bootstrapConversation("c-1", 2);
+    const four = [imageA, imageB, imageC, imageD];
+
+    const accepted = await useChatStore.getState().onUserInput("四张", four);
+    await flush();
+
+    expect(accepted).toBe(true);
+    const [post] = sendCalls();
+    expect(JSON.parse(JSON.stringify(post.body))).toEqual({
+      content: "四张",
+      attachments: four.map((im) => ({
+        name: im.name,
+        mimeType: im.mimeType,
+        data: im.dataUrl,
+      })),
+    });
+    expect(JSON.stringify(post.headers)).toContain("Idempotency-Key");
+  });
+
+  test("I3-SEND-05 accepted=true = 组件清空判据(会话在飞中删除也返回 true)", async () => {
+    await bootstrapConversation("c-9", 0);
+    const hold = holdPost();
+    const sending = useChatStore.getState().onUserInput("", [imageB]);
+    await tick();
+    expect(hold.call).not.toBeNull();
+    await useChatStore
+      .getState()
+      .deleteSession(useChatStore.getState().currentSessionIndex);
+    expect(
+      useChatStore.getState().sessions.find((s) => s.id === "c-9"),
+    ).toBeUndefined();
+    hold.release(() => hold.committed);
+    // 会话已删除 → apply 早退,但 accepted 已成立,必须返回 true(否则组件会保留 pending)
+    expect(await sending).toBe(true);
+    expect(sendCalls()).toHaveLength(1);
+  });
+
+  test("I3-SEND-06 accepted=false:同步失败返回 false,落错误气泡,不注入图片", async () => {
+    await bootstrapConversation("c-1", 2);
+    const usersBefore = usersOf("c-1").length;
+    const hold = holdPost();
+    const sending = useChatStore.getState().onUserInput("失败", [imageA]);
+    await tick();
+    hold.release(() => fail(503, "PROVIDER_BUSY", "busy"));
+
+    const accepted = await sending;
+    await flush();
+
+    expect(accepted).toBe(false);
+    const session = sessionOf("c-1");
+    expect(session.pendingRequestId).toBeUndefined();
+    expect(activeStreams()).toHaveLength(0);
+    expect(usersOf("c-1")).toHaveLength(usersBefore); // 未注入新 USER
+    const bubble = assistantsOf("c-1").at(-1)!;
+    expect(bubble.isError).toBe(true);
+    expect(bubble.errorCode).toBe("PROVIDER_BUSY");
+    expect(errorTextForCode(bubble.errorCode)).toBe("浏览器正忙,稍后再试");
+  });
+
+  test("I3-SEND-07 注入渲染 = MultimodalContent[](text 在前,image_url 依次在后)", async () => {
+    await bootstrapConversation("c-1", 2);
+    await useChatStore.getState().onUserInput("两张", [imageA, imageB]);
+    await flush();
+
+    const user = usersOf("c-1").at(-1)!;
+    expect(Array.isArray(user.content)).toBe(true);
+    expect(user.content).toEqual([
+      { type: "text", text: "两张" },
+      { type: "image_url", image_url: { url: IMG_A } },
+      { type: "image_url", image_url: { url: IMG_B } },
+    ]);
+  });
+
+  test("I3-SEND-08 不带图时 body 无 attachments 字段(旧行为不变)", async () => {
+    await bootstrapConversation("c-1", 2);
+
+    const accepted = await useChatStore.getState().onUserInput("hello");
+    await flush();
+
+    expect(accepted).toBe(true);
+    const [post] = sendCalls();
+    expect(Object.keys(post.body).sort()).toEqual(["content"]);
+    expect(post.body.content).toBe("hello");
+    expect(JSON.stringify(post.headers)).toContain("Idempotency-Key");
+    expect(activeStreams()).toHaveLength(1);
+  });
+
+  test("I3-PURE-01..03 纯图消息:无空 text part / 文本内容为 \"\" / 可取到全部图片", async () => {
+    await bootstrapConversation("c-1", 0);
+
+    await useChatStore.getState().onUserInput("", [imageA, imageB]);
+    await flush();
+
+    const user = usersOf("c-1")[0];
+    const parts = user.content as { type: string }[];
+    // 01:没有任何 text part(C 2 红线:不写伪占位、不放空 text)
+    expect(parts.some((p) => p.type === "text")).toBe(false);
+    // 02
+    expect(getMessageTextContent(user)).toBe("");
+    // 03
+    expect(getMessageImages(user)).toEqual([IMG_A, IMG_B]);
+  });
+
+  const SYNC_ERROR_CODES: { code: string; status: number; text: string }[] = [
+    {
+      code: "PAYLOAD_TOO_LARGE",
+      status: 413,
+      text: "图片请求数据过大,请减少图片或缩小后重试",
+    },
+    {
+      code: "ATTACHMENT_TOO_LARGE",
+      status: 413,
+      text: "图片过大、数量过多或总大小超限",
+    },
+    {
+      code: "UNSUPPORTED_ATTACHMENT_TYPE",
+      status: 415,
+      text: "仅支持 PNG/JPEG/WebP/GIF",
+    },
+    {
+      code: "ATTACHMENT_CAPACITY_EXCEEDED",
+      status: 503,
+      text: "服务端附件队列已满,请稍后重试",
+    },
+  ];
+
+  test.each(SYNC_ERROR_CODES)(
+    "I3-ERROR-01..04 $code:同步失败 → accepted=false + 冻结文案 + 可重发",
+    async ({ code, status, text }) => {
+      await bootstrapConversation("c-1", 2);
+      const hold = holdPost();
+      const sending = useChatStore.getState().onUserInput("", [imageA]);
+      await tick();
+      hold.release(() => fail(status, code, "boom"));
+
+      expect(await sending).toBe(false);
+      await flush();
+
+      expect(errorTextForCode(code)).toBe(text);
+      const bubble = assistantsOf("c-1").at(-1)!;
+      expect(bubble.isError).toBe(true);
+      expect(bubble.errorCode).toBe(code);
+      expect(sessionOf("c-1").pendingRequestId).toBeUndefined();
+      expect(activeStreams()).toHaveLength(0);
+
+      // 同步失败 = pending 保留可重发:同图再发一次(新 Idempotency-Key)成功
+      const accepted = await useChatStore.getState().onUserInput("", [imageA]);
+      await flush();
+      expect(accepted).toBe(true);
+      expect(sendCalls()).toHaveLength(2);
+      expect(sendCalls()[0].headers["Idempotency-Key"]).not.toBe(
+        sendCalls()[1].headers["Idempotency-Key"],
+      );
+    },
+  );
+
+  const PROVIDER_ERROR_CODES: { code: string; text: string }[] = [
+    {
+      code: "PROVIDER_ATTACHMENT_FAILED",
+      text: "Gemini 图片上传失败,请重试",
+    },
+    {
+      code: "PROVIDER_ATTACHMENT_TIMEOUT",
+      text: "Gemini 图片上传超时,请重试",
+    },
+  ];
+
+  test.each(PROVIDER_ERROR_CODES)(
+    "I3-ERROR-05..06 $code:POST 已 accepted,Provider 终态 → 文案 + pending 不恢复",
+    async ({ code, text }) => {
+      await bootstrapConversation("c-1", 0);
+
+      const accepted = await useChatStore.getState().onUserInput("", [imageA]);
+      await flush();
+      expect(accepted).toBe(true);
+      const requestId = sessionOf("c-1").pendingRequestId!;
+
+      lastSource().emit(
+        "status",
+        statusFrame(requestId, {
+          status: "FAILED",
+          requestStatus: "FAILED",
+          errorCode: code,
+          errorMessage: "provider boom",
+        }),
+      );
+      await flush();
+
+      const bubble = assistantsOf("c-1").at(-1)!;
+      expect(bubble.isError).toBe(true);
+      expect(bubble.errorCode).toBe(code);
+      expect(errorTextForCode(code)).toBe(text);
+      // accepted 后终态:pending 不恢复;不自动重发(KNOWN-I3-RETRY-01 = 需重选图)
+      expect(sessionOf("c-1").pendingRequestId).toBeUndefined();
+      expect(sendCalls()).toHaveLength(1);
+    },
+  );
+
+  test("I3-RETRY-01 同步失败可重发(false);202 后 Provider FAILED 不保留(对照)", async () => {
+    await bootstrapConversation("c-1", 0);
+
+    const hold = holdPost();
+    const sending = useChatStore.getState().onUserInput("", [imageA]);
+    await tick();
+    hold.release(() => fail(503, "ATTACHMENT_CAPACITY_EXCEEDED", "full"));
+    expect(await sending).toBe(false);
+    await flush();
+
+    await useChatStore.getState().onUserInput("", [imageA]);
+    await flush();
+    expect(sendCalls()).toHaveLength(2);
+    expect(sendCalls()[0].headers["Idempotency-Key"]).not.toBe(
+      sendCalls()[1].headers["Idempotency-Key"],
+    );
+
+    const requestId = sessionOf("c-1").pendingRequestId!;
+    lastSource().emit(
+      "status",
+      statusFrame(requestId, {
+        status: "FAILED",
+        requestStatus: "FAILED",
+        errorCode: "PROVIDER_ATTACHMENT_FAILED",
+        errorMessage: "provider boom",
+      }),
+    );
+    await flush();
+    expect(sendCalls()).toHaveLength(2); // 终态后无自动重发
+    expect(sessionOf("c-1").pendingRequestId).toBeUndefined();
+    expect(assistantsOf("c-1").at(-1)!.errorCode).toBe(
+      "PROVIDER_ATTACHMENT_FAILED",
+    );
+  });
+
+  test("I3-SEND-09A 窗口 A(apply 的 set 之前抛)→ canonical reset 为 no-op 后 recovery 重建", async () => {
+    await bootstrapConversation("c-1", 2);
+    const hold = holdPost();
+    const sending = useChatStore.getState().onUserInput("", [imageA]);
+    await tick();
+    const { userMessage, assistantMessage, requestId } = committedPair("c-1");
+    hold.release(() =>
+      sendResult(
+        userMessage,
+        assistantMessage,
+        throwOnceOnRequestStatus(assistantMessage.request!),
+      ),
+    );
+
+    const accepted = await sending;
+    expect(accepted).toBe(true);
+    await flush();
+
+    const session = sessionOf("c-1");
+    expect(session.pendingRequestId).toBe(requestId); // (c)
+    expect(usersOf("c-1")).toHaveLength(2); // 种子 1 条 + 本次 1 条
+    expect(getMessageImages(usersOf("c-1").at(-1)!)).toEqual([IMG_A]); // (b) 纯图不退化
+    expect(assistantsOf("c-1")).toHaveLength(2); // 种子 1 条 + 本次 1 条
+    expect(session.messages.some((m) => m.isError)).toBe(false); // (e)
+    expect(activeStreams()).toHaveLength(1); // (d) 恰 1 条活动订阅
+    expect(activeStreams()[0].url).toContain(`/requests/${requestId}/events`);
+    // (h) eventual refresh(同 id USER 纯文本 fresh)后图片仍在、tracking 不变
+    expect(session.pendingRequestId).toBe(requestId);
+    expect(getMessageImages(usersOf("c-1").at(-1)!)).toEqual([IMG_A]);
+    expect(sendCalls()).toHaveLength(1);
+  });
+
+  test("I3-SEND-09B 窗口 B(已 set、follow 抛)→ close 半建立状态 + recovery 重建新 SSE;B 会话不受影响", async () => {
+    server.conversations = [conversation("c-2", "c-2 会话"), conversation("c-1", "c-1 会话")];
+    server.messages.set("c-1", []);
+    server.messages.set("c-2", []);
+    await useChatStore.getState().bootstrap();
+    await tick();
+    // c-2 上先建立一条活动 request + SSE(用于验证跨会话隔离,K4)
+    const indexOf = (id: string) =>
+      useChatStore.getState().sessions.findIndex((s) => s.id === id);
+    useChatStore.setState({ currentSessionIndex: indexOf("c-2") });
+    await useChatStore.getState().onUserInput("c2 提问");
+    await flush();
+    const c2RequestId = sessionOf("c-2").pendingRequestId!;
+    const c2Streams = () =>
+      FakeEventSource.instances.filter(
+        (s) => s.url.includes(c2RequestId) && !s.closed,
+      );
+    expect(c2Streams()).toHaveLength(1);
+
+    useChatStore.setState({ currentSessionIndex: indexOf("c-1") });
+    const originalFollow = useChatStore.getState().followRequest;
+    let injections = 0;
+    useChatStore.setState({
+      followRequest: (
+        conversationId: string,
+        requestId: string,
+        messageId: string,
+      ) => {
+        originalFollow(conversationId, requestId, messageId); // 先建立(半/已建立状态)
+        if (injections === 0) {
+          injections += 1;
+          throw new Error("injected-B");
+        }
+      },
+    });
+    try {
+      const accepted = await useChatStore.getState().onUserInput("", [imageA]);
+      expect(accepted).toBe(true);
+      await flush();
+
+      const session = sessionOf("c-1");
+      const requestId = session.pendingRequestId!;
+      expect(requestId).toMatch(/^req-/);
+      expect(usersOf("c-1")).toHaveLength(1);
+      expect(getMessageImages(usersOf("c-1").at(-1)!)).toEqual([IMG_A]);
+      expect(assistantsOf("c-1")).toHaveLength(1);
+      expect(session.messages.some((m) => m.isError)).toBe(false);
+      // 旧订阅被 close,新订阅真正建立:实例 2 条,活动恰 1 条且指向本次 request
+      expect(FakeEventSource.instances).toHaveLength(3); // c-2 ×1 + c-1 ×2
+      expect(activeStreams()).toHaveLength(2); // c-2 的 1 条 + c-1 恢复后的 1 条
+      expect(
+        FakeEventSource.instances.filter(
+          (s) => s.url.includes(requestId) && !s.closed,
+        ),
+      ).toHaveLength(1);
+      // (g) B 会话 stream/pending 不受影响
+      expect(sessionOf("c-2").pendingRequestId).toBe(c2RequestId);
+      expect(c2Streams()).toHaveLength(1);
+    } finally {
+      useChatStore.setState({ followRequest: originalFollow });
+    }
+  });
+
+  test("I3-SEND-09C 窗口 C(follow 已建立、reloadList 抛)→ recovery 重建,无伪失败气泡", async () => {
+    await bootstrapConversation("c-1", 2);
+    const originalReloadList = useChatStore.getState().reloadList;
+    let injected = false;
+    useChatStore.setState({
+      reloadList: () => {
+        if (!injected) {
+          injected = true;
+          throw new Error("injected-C");
+        }
+        return originalReloadList();
+      },
+    });
+    try {
+      const accepted = await useChatStore.getState().onUserInput("", [imageA]);
+      expect(accepted).toBe(true);
+      await flush();
+
+      const session = sessionOf("c-1");
+      expect(session.pendingRequestId).toMatch(/^req-/);
+      const requestId = session.pendingRequestId!;
+      expect(getMessageImages(usersOf("c-1").at(-1)!)).toEqual([IMG_A]);
+      expect(assistantsOf("c-1")).toHaveLength(2); // 种子 1 条 + 本次 1 条
+      expect(session.messages.some((m) => m.isError)).toBe(false);
+      expect(FakeEventSource.instances).toHaveLength(2); // 建立 → 异常 → close → 重建
+      expect(
+        FakeEventSource.instances.filter(
+          (s) => s.url.includes(requestId) && !s.closed,
+        ),
+      ).toHaveLength(1);
+      expect(getMessageImages(usersOf("c-1").at(-1)!)).toEqual([IMG_A]); // refresh 后不擦图
+    } finally {
+      useChatStore.setState({ reloadList: originalReloadList });
+    }
+  });
+
+  test("I3-SEND-10 recovery 自身也失败 → 仍 true、不重复 POST;可经 refresh 自愈", async () => {
+    await bootstrapConversation("c-1", 2);
+    const hold = holdPost();
+    const sending = useChatStore.getState().onUserInput("", [imageA]);
+    await tick();
+    const { userMessage, assistantMessage, requestId } = committedPair("c-1");
+    // 抛 2 次 = 首次 apply 与 recovery 各一次(注入是测试装置,后端数据本身完好)
+    hold.release(() =>
+      sendResult(
+        userMessage,
+        assistantMessage,
+        throwTimesOnRequestStatus(assistantMessage.request!, 2),
+      ),
+    );
+    const messageCallsBefore = messageCalls().length;
+
+    const accepted = await sending;
+    expect(accepted).toBe(true); // (a) 不得回退成「未发送」
+    expect(sendCalls()).toHaveLength(1); // (c) 无第二次 POST
+    await flush();
+    // (d) void refreshSessionMessages 仍作为 best-effort 被调用
+    expect(messageCalls().length).toBeGreaterThan(messageCallsBefore);
+    // (e) 经 refresh 恢复 tracking(消息与 pending 由后端数据重建)
+    const ids = sessionOf("c-1").messages.map((m) => m.id);
+    expect(ids.filter((id) => id === userMessage.id)).toHaveLength(1);
+    expect(ids.filter((id) => id === assistantMessage.id)).toHaveLength(1);
+    expect(sessionOf("c-1").pendingRequestId).toBe(requestId);
+    expect(
+      FakeEventSource.instances.filter(
+        (s) => s.url.includes(requestId) && !s.closed,
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("I3-SEND-11 latest-slot 占用时发送:tracking 在返回前建立,不依赖 trailing refresh", async () => {
+    await bootstrapConversation("c-1", 2);
+    const refreshHold = holdMessages(
+      (id, params) => id === "c-1" && params.get("cursor") === null,
+    );
+    const refreshing = useChatStore.getState().refreshSessionMessages("c-1");
+    await tick();
+    expect(refreshHold.call).not.toBeNull(); // slot 已被占用
+
+    const originalFollow = useChatStore.getState().followRequest;
+    let injections = 0;
+    useChatStore.setState({
+      followRequest: (
+        conversationId: string,
+        requestId: string,
+        messageId: string,
+      ) => {
+        originalFollow(conversationId, requestId, messageId);
+        if (injections === 0) {
+          injections += 1;
+          throw new Error("injected-B");
+        }
+      },
+    });
+    try {
+      const accepted = await useChatStore.getState().onUserInput("", [imageA]);
+      expect(accepted).toBe(true);
+      // 关键:此刻 refresh 仍被 hold 挂着,但 pending 与真 SSE 已建立
+      const requestId = sessionOf("c-1").pendingRequestId!;
+      expect(requestId).toMatch(/^req-/);
+      expect(
+        FakeEventSource.instances.filter(
+          (s) => s.url.includes(requestId) && !s.closed,
+        ),
+      ).toHaveLength(1);
+
+      refreshHold.release(() =>
+        route(`/backend-api/conversations/c-1/messages?limit=50`, "GET", undefined),
+      );
+      await refreshing;
+      await flush();
+      expect(sessionOf("c-1").pendingRequestId).toBe(requestId);
+      const userWithImage = usersOf("c-1").find(
+        (m) => getMessageImages(m).length > 0,
+      )!;
+      expect(userWithImage).toBeTruthy();
+      expect(getMessageImages(userWithImage)).toEqual([IMG_A]);
+    } finally {
+      useChatStore.setState({ followRequest: originalFollow });
+    }
+  });
+
+  test("I3-SEND-12 GET-before-POST 同 id USER:恰 1 条且不吞图(纯图变体)", async () => {
+    // GET 先落页:USER id=m-1 纯图版本(content="",无图)→ 随后 send apply 才注入 imageA
+    server.conversations = [conversation("c-1", "c-1 会话")];
+    server.messages.set("c-1", [
+      message("m-1", "c-1", "USER", "", { position: 1 }),
+      message("m-2", "c-1", "ASSISTANT", "旧回答", { position: 2 }),
+    ]);
+    await useChatStore.getState().bootstrap();
+    await tick();
+
+    const hold = holdPost();
+    const sending = useChatStore.getState().onUserInput("", [imageA]);
+    await tick();
+    hold.release(() =>
+      sendResult(
+        message("m-1", "c-1", "USER", "", { position: 1 }),
+        message("m-9", "c-1", "ASSISTANT", "", {
+          status: "PENDING",
+          position: 9,
+          request: {
+            id: "req-1",
+            status: "PENDING",
+            errorCode: null,
+            errorMessage: null,
+          },
+        }),
+        request("req-1", "c-1", "m-1", "m-9"),
+      ),
+    );
+
+    expect(await sending).toBe(true);
+    await flush();
+
+    const users = sessionOf("c-1").messages.filter((m) => m.id === "m-1");
+    expect(users).toHaveLength(1); // (a) 不追加副本
+    expect(getMessageImages(users[0])).toEqual([IMG_A]); // (b) 图片不被 GET 版本吞掉
+    const parts = users[0].content as { type: string }[];
+    expect(parts.some((p) => p.type === "text")).toBe(false); // 纯图无空 text part
+    expect(assistantsOf("c-1").map((m) => m.id)).toEqual(["m-2", "m-9"]); // (c) 恰 1 条新增
+  });
+
+  test("I3-SEND-12A GET-before-POST 同 id USER:文本+图两 part 同时存在", async () => {
+    server.conversations = [conversation("c-1", "c-1 会话")];
+    server.messages.set("c-1", [
+      message("m-1", "c-1", "USER", "describe", { position: 1 }),
+      message("m-2", "c-1", "ASSISTANT", "旧回答", { position: 2 }),
+    ]);
+    await useChatStore.getState().bootstrap();
+    await tick();
+
+    const hold = holdPost();
+    const sending = useChatStore.getState().onUserInput("describe", [imageA]);
+    await tick();
+    hold.release(() =>
+      sendResult(
+        message("m-1", "c-1", "USER", "describe", { position: 1 }),
+        message("m-9", "c-1", "ASSISTANT", "", {
+          status: "PENDING",
+          position: 9,
+          request: {
+            id: "req-1",
+            status: "PENDING",
+            errorCode: null,
+            errorMessage: null,
+          },
+        }),
+        request("req-1", "c-1", "m-1", "m-9"),
+      ),
+    );
+
+    expect(await sending).toBe(true);
+    await flush();
+
+    const users = sessionOf("c-1").messages.filter((m) => m.id === "m-1");
+    expect(users).toHaveLength(1);
+    expect(users[0].content).toEqual([
+      { type: "text", text: "describe" },
+      { type: "image_url", image_url: { url: IMG_A } },
+    ]);
+  });
+
+  test("I3-SEND-13A Case 1 overlap:同 id USER 纯文本 fresh → imageA 仍在,ASSISTANT merge 不变", async () => {
+    await bootstrapConversation("c-1", 2);
+    await useChatStore.getState().onUserInput("看图", [imageA]);
+    await flush();
+    const sentUser = usersOf("c-1").at(-1)!;
+    expect(getMessageImages(sentUser)).toEqual([IMG_A]);
+
+    await useChatStore.getState().refreshSessionMessages("c-1");
+    await flush();
+
+    const after = sessionOf("c-1").messages.filter((m) => m.id === sentUser.id);
+    expect(after).toHaveLength(1);
+    expect(getMessageImages(after[0])).toEqual([IMG_A]);
+    expect(getMessageTextContent(after[0])).toBe("看图");
+    expect(JSON.stringify(after[0].content)).not.toContain("[图片");
+    expect(assistantsOf("c-1")).toHaveLength(2);
+  });
+
+  test("I3-SEND-13B Case 0 空链重建:transient USER 同 id fresh → 图片还原", async () => {
+    await bootstrapConversation("c-1", 0);
+    server.messages.set("c-1", [
+      message("u-1", "c-1", "USER", "", { position: 1 }),
+      message("a-1", "c-1", "ASSISTANT", "回答", { position: 2 }),
+    ]);
+    setSessionMessages("c-1", [
+      {
+        id: "u-1",
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: IMG_A } }],
+        date: STAMP,
+      } as ChatSession["messages"][number],
+    ]);
+
+    await useChatStore.getState().refreshSessionMessages("c-1");
+    await flush();
+
+    const users = sessionOf("c-1").messages.filter((m) => m.id === "u-1");
+    expect(users).toHaveLength(1);
+    expect(getMessageImages(users[0])).toEqual([IMG_A]);
+    expect(getMessageTextContent(users[0])).toBe("");
+    expect(sessionOf("c-1").messages.map((m) => m.id)).toEqual(["u-1", "a-1"]);
+  });
+
+  test("I3-SEND-13C Case 2 gap:整组替换语义不变;同 id 在窗口内时 overlay 仍生效", async () => {
+    await bootstrapConversation("c-1", 2);
+    // 变体:本地另有 transient USER(带图),fresh 窗口含同 id → gap 重建后图片还原
+    setSessionMessages("c-1", [
+      ...sessionOf("c-1").messages,
+      {
+        id: "u-9",
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: IMG_B } }],
+        date: STAMP,
+      } as ChatSession["messages"][number],
+    ]);
+    server.messages.set("c-1", [
+      message("u-9", "c-1", "USER", "", { position: 100 }),
+      message("a-9", "c-1", "ASSISTANT", "新窗口回答", { position: 101 }),
+    ]);
+
+    await useChatStore.getState().refreshSessionMessages("c-1");
+    await flush();
+
+    const session = sessionOf("c-1");
+    // 整组替换:窗口 = fresh 两条(旧位置 1..2 与 transient 一并被替换)
+    expect(session.messages.map((m) => m.id)).toEqual(["u-9", "a-9"]);
+    expect(getMessageImages(session.messages[0])).toEqual([IMG_B]);
+    expect(getMessageTextContent(session.messages[0])).toBe("");
+    expect(JSON.stringify(session.messages[0].content)).not.toContain("[图片");
+    // 无重复 id(overlay 不引入副本)
+    const ids = session.messages.map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

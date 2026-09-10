@@ -107,6 +107,12 @@ const cn = {
     },
     Rename: "重命名对话",
     Typing: "正在输入…",
+    ImageTooLarge: "图片过大(上限 5MB),请压缩后再试",
+    ImageTypeUnsupported: "不支持的图片格式(仅支持 PNG/JPEG/WebP/GIF)",
+    ImageCountExceeded: "最多只能添加 4 张图片",
+    ImageTotalExceeded: "图片总大小超限(上限 10MB)",
+    ImageReadFailed: "无法读取该图片",
+    ImagePreparing: "图片处理中…",
     Input: (submitKey: string) => {
       var inputHints = `${submitKey} 发送`;
       if (submitKey === String(SubmitKey.Enter)) {

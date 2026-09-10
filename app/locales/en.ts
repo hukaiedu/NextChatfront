@@ -108,6 +108,12 @@ const en: LocaleType = {
     },
     Rename: "Rename Chat",
     Typing: "Typing…",
+    ImageTooLarge: "Image is too large (max 5MB), please compress and retry",
+    ImageTypeUnsupported: "Unsupported image format (PNG/JPEG/WebP/GIF only)",
+    ImageCountExceeded: "Up to 4 images can be attached",
+    ImageTotalExceeded: "Total image size exceeds the 10MB limit",
+    ImageReadFailed: "Failed to read the image",
+    ImagePreparing: "Preparing image…",
     Input: (submitKey: string) => {
       var inputHints = `${submitKey} to send`;
       if (submitKey === String(SubmitKey.Enter)) {
