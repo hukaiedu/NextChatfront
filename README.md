@@ -49,7 +49,6 @@ Frontend 只负责 UI 和交互;Backend 是 Conversation / Message / Request 的
 - 模型切换(固定使用 `Gemini Web` 通道;V1.1 新增的会话级 Gemini 模型选择见下文「模型选择(V1.1)」,不属于 NextChat 原生 Provider 体系)
 - WebDAV / Upstash 同步
 - ShareGPT 分享
-- 图片上传(发送时携带图片会被拒绝)
 - Artifacts(Cloudflare KV 分享代理已下线,前端接口返回 404)
 
 ## 技术栈
@@ -239,6 +238,14 @@ POST /backend-api/conversations/:id/messages(得到 Request)
 - **不落本地**:状态与登录态只存在于内存 store,localStorage 不写任何浏览器状态。
 - **后端规格**:`docs/browser-status-api.md`(字段语义、状态机、`BROWSER_*` 错误码、并发约束与验收清单)。
 
+## 图片附件(V1.2)
+
+- 支持从输入区选择 PNG / JPEG / WebP / GIF。
+- 最多 4 张;最终单图 ≤ 5MiB、总计 ≤ 10MiB。
+- 支持纯图片消息。
+- 支持通过输入框粘贴图片(Chromium 已验证;Safari 尚未正式验收)。
+- hard reload 后历史图片显示占位信息;原图字节不持久化,不会恢复历史原图。
+
 ## SSE 流式
 
 前端通过 `GET /backend-api/requests/:id/events`(经 rewrite 到后端 `/api/requests/:id/events`)用 `EventSource` 订阅一条 Request 的回答流。
@@ -344,7 +351,7 @@ V1 不再使用 NextChat 原 Provider API。以下路由已统一返回 **404**:
 ## 开发与测试
 
 ```bash
-# 单元测试(CI 模式,当前 37 个测试套件 / 216 个用例全通过)
+# 单元测试(CI 模式,V1.2 冻结验收:43 个测试套件 / 440 个测试 PASS)
 yarn test:ci
 
 # TypeScript 类型检查
@@ -392,7 +399,6 @@ Backend:
 - **Gemini DOM 依赖**:Gemini Web 页面改版会影响 Backend 自动化。
 - **单实例**:Backend 当前为单实例架构。
 - **RATE_LIMITED**:该错误码当前无可靠的真实检测。
-- **浏览器状态待后端接口**:前端已就绪,但 `GET /api/browser/status` / `POST /api/browser/restart` 尚未实现,面板在此期间只显示升级提示(规格见 `docs/browser-status-api.md`)。
 
 ## 安全说明
 
