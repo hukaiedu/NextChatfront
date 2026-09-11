@@ -129,3 +129,30 @@ describe("I3-A preserveLocalUserImages(M1/M9 纯函数)", () => {
     expect(getMessageTextContent(twice)).toBe("t");
   });
 });
+
+describe("I3.5 历史份数与图片 overlay(I35-FE-06)", () => {
+  test("I35-FE-06 merge:fresh.attachmentCount 保留 + local image_url 保留", () => {
+    const fresh = msg({
+      id: "m-1",
+      content: "后端权威文本",
+      attachmentCount: 1,
+      position: 5,
+    });
+    const local = withImages("m-1", "", [IMG_A]);
+
+    const merged = preserveLocalUserImages(fresh, local);
+
+    // fresh 的 attachmentCount 不因重建 content 丢失
+    expect(merged.attachmentCount).toBe(1);
+    // local 的真实图片按顺序重挂(真实图片优先,INV-I35-OVERLAY-01)
+    expect(getMessageImages(merged)).toEqual([IMG_A]);
+    expect(getMessageTextContent(merged)).toBe("后端权威文本");
+
+    // local 无图 → 直通返回 fresh 引用,attachmentCount 原样
+    const direct = msg({ id: "m-2", content: "t", attachmentCount: 0 });
+    expect(preserveLocalUserImages(direct, msg({ id: "m-2" }))).toBe(direct);
+    expect(preserveLocalUserImages(direct, msg({ id: "m-2" })).attachmentCount).toBe(
+      0,
+    );
+  });
+});

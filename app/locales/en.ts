@@ -114,6 +114,9 @@ const en: LocaleType = {
     ImageTotalExceeded: "Total image size exceeds the 10MB limit",
     ImageReadFailed: "Failed to read the image",
     ImagePreparing: "Preparing image…",
+    ImageHistory: (count: number) =>
+      count > 1 ? `Historical images · ${count}` : "Historical image",
+    ImageHistoryHint: "The original image is no longer available",
     Input: (submitKey: string) => {
       var inputHints = `${submitKey} to send`;
       if (submitKey === String(SubmitKey.Enter)) {

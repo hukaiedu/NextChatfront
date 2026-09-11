@@ -113,6 +113,9 @@ const cn = {
     ImageTotalExceeded: "图片总大小超限(上限 10MB)",
     ImageReadFailed: "无法读取该图片",
     ImagePreparing: "图片处理中…",
+    ImageHistory: (count: number) =>
+      count > 1 ? `历史图片 · ${count} 张` : "历史图片",
+    ImageHistoryHint: "原图已不可恢复",
     Input: (submitKey: string) => {
       var inputHints = `${submitKey} 发送`;
       if (submitKey === String(SubmitKey.Enter)) {

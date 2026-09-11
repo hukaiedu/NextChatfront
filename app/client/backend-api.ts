@@ -109,6 +109,11 @@ export interface BackendMessage {
   updatedAt: string;
   /** 只有 ASSISTANT 消息带;USER 消息固定 null */
   request?: BackendRequestBrief | null;
+  /**
+   * I3.5:USER 消息提交时携带的图片份数(原图字节从未持久化,只留份数)。
+   * optional:旧后端不返回时为 undefined,消费侧按 0 兜底。
+   */
+  attachmentCount?: number;
 }
 
 export interface BackendRequest {

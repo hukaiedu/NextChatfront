@@ -80,6 +80,11 @@ export type ChatMessage = RequestMessage & {
    * 本地占位 / send 失败 error bubble)允许 undefined。禁止 ?? 0 之类的兜底。
    */
   position?: number;
+  /**
+   * I3.5:USER 提交时携带的图片份数(后端 DTO 唯一来源;旧后端缺省 undefined)。
+   * 无 ephemeral image_url 时据此渲染「历史图片」占位。
+   */
+  attachmentCount?: number;
 };
 
 export function createMessage(override: Partial<ChatMessage>): ChatMessage {
@@ -274,6 +279,9 @@ function toChatMessage(message: BackendMessage): ChatMessage {
     model: BACKEND_MODEL_LABEL,
     // PAG-2:persisted Backend Message 的 position 原样写入(缺省即 invariant,不兜底)
     position: message.position,
+    // I3.5:唯一映射点 —— send result / latest / pagination / refresh / recovery / bootstrap
+    // 全路径都经 toChatMessage,禁止在各路径单独赋值
+    attachmentCount: message.attachmentCount ?? 0,
   };
 }
 

@@ -1230,6 +1230,8 @@ function _Chat(props: { attachment: AttachmentController }) {
               {messages.map((message, i) => {
                 const isUser = message.role === "user";
                 const messageImages = getMessageImages(message);
+                // I3.5:历史图片份数(旧后端缺省 0);真实 image_url 存在时优先渲染真实图片
+                const attachmentCount = message.attachmentCount ?? 0;
                 const showActions =
                   i > 0 &&
                   !(message.preview || message.content.length === 0) &&
@@ -1307,8 +1309,8 @@ function _Chat(props: { attachment: AttachmentController }) {
                             parentRef={scrollRef}
                             defaultShow={i >= messages.length - 6}
                           />
-                          {messageImages.length > 0 &&
-                            (messageImages.length === 1 ? (
+                          {messageImages.length > 0 ? (
+                            messageImages.length === 1 ? (
                               <img
                                 className={styles["chat-message-item-image"]}
                                 src={messageImages[0]}
@@ -1336,7 +1338,25 @@ function _Chat(props: { attachment: AttachmentController }) {
                                   />
                                 ))}
                               </div>
-                            ))}
+                            )
+                          ) : isUser && attachmentCount > 0 ? (
+                            // I3.5:原图字节从未持久化,历史 USER 消息只按份数显示占位(不弹空 modal)
+                            <div
+                              className={
+                                styles["chat-message-item-image-placeholder"]
+                              }
+                              role="img"
+                              aria-label={Locale.Chat.ImageHistory(
+                                attachmentCount,
+                              )}
+                              title={Locale.Chat.ImageHistoryHint}
+                            >
+                              <ImageIcon aria-hidden="true" />
+                              <span aria-hidden="true">
+                                {Locale.Chat.ImageHistory(attachmentCount)}
+                              </span>
+                            </div>
+                          ) : null}
                           {message.isError && (
                             <div className={styles["chat-message-error"]}>
                               {errorTextForCode(message.errorCode)}

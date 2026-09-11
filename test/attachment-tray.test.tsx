@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import React from "react";
 import fs from "fs";
-import type { ChatSession } from "../app/store/chat";
+import type { ChatMessage, ChatSession } from "../app/store/chat";
 import type {
   BackendConversation,
   BackendMessage,
@@ -277,6 +277,11 @@ function sendResponse(call: RecordedCall, conversationId: string) {
     "USER",
     String(call.body?.content ?? ""),
     existing.length + 1,
+    {
+      attachmentCount: Array.isArray(call.body?.attachments)
+        ? call.body.attachments.length
+        : 0,
+    },
   );
   const assistantMessage = backendMessage(
     `a-${server.nextMessageId++}`,
@@ -1608,5 +1613,232 @@ describe("I3-B 粘贴上传(I3B-PASTE)", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(trayImages()).toHaveLength(0);
     expect(bodyText()).toContain(Locale.Chat.ImageTypeUnsupported);
+  });
+});
+
+// ---- I3.5:历史图片占位 ----
+
+/** I3.5 历史图片占位卡:CSS Module 类名在测试环境是空串,按 title 语义属性定位 */
+const imagePlaceholders = () =>
+  Array.from(
+    document.querySelectorAll(`[title="${Locale.Chat.ImageHistoryHint}"]`),
+  ) as HTMLElement[];
+
+/** 页面上 src 为 data:image 开头的真实图片 */
+const dataImages = () =>
+  Array.from(document.querySelectorAll("img")).filter((img) =>
+    (img.getAttribute("src") ?? "").startsWith("data:image"),
+  );
+
+function userMessage(
+  id: string,
+  content: ChatMessage["content"],
+  extra: Partial<ChatMessage> = {},
+): ChatMessage {
+  return {
+    id,
+    role: "user",
+    content,
+    date: STAMP,
+    ...extra,
+  } as ChatMessage;
+}
+
+function assistantMessage(
+  id: string,
+  content: string,
+  extra: Partial<ChatMessage> = {},
+): ChatMessage {
+  return {
+    id,
+    role: "assistant",
+    content,
+    date: STAMP,
+    streaming: false,
+    ...extra,
+  } as ChatMessage;
+}
+
+describe("I3.5 历史图片占位(I35-FE)", () => {
+  test("I35-FE-01 USER 纯文本 count=0:无占位、无真实图片", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([
+      makeSession({
+        messages: [userMessage("m-1", "你好", { attachmentCount: 0 })],
+      }),
+    ]);
+    await renderChat();
+
+    // Markdown 走 next/dynamic,jest 内不解析文本(既有环境限制,文本可见性由 REAL-I35-05 覆盖)
+    expect(document.querySelector('[data-message-id="m-1"]')).not.toBeNull();
+    expect(sessionOf("c-1").messages[0]!.content).toBe("你好");
+    expect(imagePlaceholders()).toHaveLength(0);
+    expect(dataImages()).toHaveLength(0);
+  });
+
+  test("I35-FE-02 纯图历史(空 content + count=1):占位卡出现,点击不弹空 modal", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([
+      makeSession({
+        messages: [userMessage("m-1", "", { attachmentCount: 1 })],
+      }),
+    ]);
+    await renderChat();
+
+    expect(imagePlaceholders()).toHaveLength(1);
+    const placeholder = imagePlaceholders()[0]!;
+    expect(placeholder.getAttribute("role")).toBe("img");
+    expect(placeholder.getAttribute("aria-label")).toBe(
+      Locale.Chat.ImageHistory(1),
+    );
+    expect(placeholder.textContent).toBe(Locale.Chat.ImageHistory(1));
+    // 图标与文字 aria-hidden,避免重复朗读
+    expect(
+      placeholder.querySelectorAll('[aria-hidden="true"]').length,
+    ).toBe(2);
+    expect(dataImages()).toHaveLength(0);
+
+    // 原图不存在:无 onClick,点击不弹空 modal
+    await act(async () => {
+      fireEvent.click(placeholder);
+      await tick();
+    });
+    expect(modalImages()).toHaveLength(0);
+  });
+
+  test("I35-FE-03 USER 文本 + count=1:文本与占位同时存在", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([
+      makeSession({
+        messages: [userMessage("m-1", "帮我看看", { attachmentCount: 1 })],
+      }),
+    ]);
+    await renderChat();
+
+    expect(sessionOf("c-1").messages[0]!.content).toBe("帮我看看");
+    expect(document.querySelector('[data-message-id="m-1"]')).not.toBeNull();
+    expect(imagePlaceholders()).toHaveLength(1);
+  });
+
+  test("I35-FE-04 count=4:恰好一个占位卡,文案含 4 张(非 4 个 skeleton)", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([
+      makeSession({
+        messages: [userMessage("m-1", "", { attachmentCount: 4 })],
+      }),
+    ]);
+    await renderChat();
+
+    expect(imagePlaceholders()).toHaveLength(1);
+    const placeholder = imagePlaceholders()[0]!;
+    expect(placeholder.textContent).toBe(Locale.Chat.ImageHistory(4));
+    expect(placeholder.textContent).toContain("4");
+    expect(placeholder.getAttribute("title")).toBe(Locale.Chat.ImageHistoryHint);
+  });
+
+  test("I35-FE-05 count=1 且本地 image_url 存在:只显示真实图片(INV-I35-OVERLAY-01)", async () => {
+    server.conversations = [conversation("c-1")];
+    const localUrl = `data:image/png;base64,${"L".repeat(32)}`;
+    applySessions([
+      makeSession({
+        messages: [
+          userMessage(
+            "m-1",
+            [{ type: "image_url" as const, image_url: { url: localUrl } }],
+            { attachmentCount: 1 },
+          ),
+        ],
+      }),
+    ]);
+    await renderChat();
+
+    expect(dataImages().map((img) => img.getAttribute("src"))).toEqual([
+      localUrl,
+    ]);
+    expect(imagePlaceholders()).toHaveLength(0);
+  });
+
+  test("I35-FE-07 硬 reload 等价:bootstrap 拉到的 count=1 → 占位;无 count 旧消息按 0", async () => {
+    server.conversations = [conversation("c-1")];
+    server.messages.set("c-1", [
+      backendMessage("m-1", "c-1", "USER", "旧文本", 1),
+      backendMessage("m-2", "c-1", "ASSISTANT", "旧回答", 2),
+      backendMessage("m-3", "c-1", "USER", "", 3, { attachmentCount: 1 }),
+      backendMessage("m-4", "c-1", "ASSISTANT", "看图回答", 4),
+    ]);
+    applySessions([makeSession({ loaded: false, messages: [] })]);
+    await renderChat();
+
+    await act(async () => {
+      await useChatStore.getState().loadSessionMessages("c-1");
+      await tick();
+    });
+
+    const session = sessionOf("c-1");
+    expect(session.messages.find((m) => m.id === "m-1")!.attachmentCount).toBe(
+      0,
+    );
+    expect(session.messages.find((m) => m.id === "m-3")!.attachmentCount).toBe(
+      1,
+    );
+
+    expect(document.querySelector('[data-message-id="m-1"]')).not.toBeNull();
+    expect(document.querySelector('[data-message-id="m-3"]')).not.toBeNull();
+    expect(imagePlaceholders()).toHaveLength(1);
+    expect(imagePlaceholders()[0]!.textContent).toBe(
+      Locale.Chat.ImageHistory(1),
+    );
+  });
+
+  test("I35-FE-08 ASSISTANT 误带 count=1:不显示占位(role 双保险)", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([
+      makeSession({
+        messages: [
+          userMessage("m-1", "你好"),
+          assistantMessage("m-2", "回答内容", { attachmentCount: 1 }),
+        ],
+      }),
+    ]);
+    await renderChat();
+
+    expect(document.querySelector('[data-message-id="m-2"]')).not.toBeNull();
+    expect(imagePlaceholders()).toHaveLength(0);
+  });
+
+  test("I35-FE-09 发送链路:POST 的 attachmentCount 保留到 store,真图优先于占位", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    await pickFiles([fileOf("a.png", "image/png", 1024, PNG_A)]);
+
+    const hold = holdSend("c-1");
+    await clickSend();
+    await releaseSend(hold);
+
+    const userMessage = sessionOf("c-1").messages.find(
+      (m) => m.role === "user",
+    )!;
+    expect(userMessage.attachmentCount).toBe(1);
+    expect(getMessageImages(userMessage)).toEqual([PNG_A]);
+    expect(dataImages().map((img) => img.getAttribute("src"))).toContain(PNG_A);
+    expect(imagePlaceholders()).toHaveLength(0);
+  });
+
+  test("I35-FE-10 静态约束:无 onClick/showImageModal、cursor default、无 skeleton 动画", () => {
+    const tsx = fs.readFileSync("app/components/chat.tsx", "utf8");
+    const marker = tsx.indexOf("chat-message-item-image-placeholder");
+    expect(marker).toBeGreaterThanOrEqual(0);
+    const block = tsx.slice(marker, tsx.indexOf("</div>", marker));
+    expect(block).toContain('role="img"');
+    expect(block).not.toContain("onClick");
+    expect(block).not.toContain("showImageModal");
+
+    const scss = fs.readFileSync("app/components/chat.module.scss", "utf8");
+    const ruleStart = scss.indexOf(".chat-message-item-image-placeholder");
+    expect(ruleStart).toBeGreaterThanOrEqual(0);
+    const rule = scss.slice(ruleStart, scss.indexOf("}", ruleStart));
+    expect(rule).toContain("cursor: default");
+    expect(rule).not.toContain("animation");
   });
 });
