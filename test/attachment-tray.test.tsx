@@ -22,6 +22,8 @@ import type {
  * - I3-DRAFT-01..04   草稿 promotion:remount 不归零 / 失败保留重试 / 恰一次 / accepted 清空
  * - I3-MEM-CONV-01    慢压缩期间切会话,旧结果不得进入新会话
  * - I3-MEM-01..03     切会话清空 / 卸载无持久化 / 硬 reload 无本地副本
+ * - I3B-PASTE-01..14  粘贴上传:纯文本零介入 / supported 图片优先 / unsupported 不吞文本 /
+ *                     三态 gate / SWITCH / PROMOTION / 空名补名 / POST attachments
  *
  * 渲染完整 <Chat>,从最外层伪造 fetch(内存版后端)与 FileReader/Image/canvas,
  * 使"准备中(PREPARING)"与"POST 在途(SUBMITTING)"两个窗口可被精确挂起。
@@ -62,13 +64,21 @@ let heldReaders: (() => void)[] = [];
 let imageHold = false;
 let heldImages: (() => void)[] = [];
 
+/**
+ * I3B-PASTE-13:生产 normalize 对空名文件执行 new File([file], fallbackName),
+ * 测试标记 __dataUrl 不会随克隆传递 —— 按最终 name 注册回退表。
+ */
+const pasteFallbackDataUrls = new Map<string, string>();
+
 class FakeFileReader {
   onload: ((event: unknown) => void) | null = null;
   onerror: (() => void) | null = null;
   result: string | undefined;
 
   readAsDataURL(file: Blob) {
-    const dataUrl = (file as unknown as { __dataUrl?: string }).__dataUrl;
+    const dataUrl =
+      (file as unknown as { __dataUrl?: string }).__dataUrl ??
+      pasteFallbackDataUrls.get((file as File).name);
     if (typeof dataUrl !== "string") {
       throw new Error("测试文件未设置 __dataUrl");
     }
@@ -520,6 +530,35 @@ async function pickFiles(files: File[]) {
   });
 }
 
+interface PasteItemSpec {
+  kind?: string;
+  type?: string;
+  file?: File | null;
+}
+
+/**
+ * I3-B:自造 cancelable paste 事件(jsdom 无真实 DataTransfer,也不执行
+ * 浏览器默认文本插入动作);返回值可断言 defaultPrevented。
+ */
+async function pasteItems(items: PasteItemSpec[]) {
+  const event = new Event("paste", {
+    bubbles: true,
+    cancelable: true,
+  }) as Event & { clipboardData: unknown };
+  event.clipboardData = {
+    items: items.map((item) => ({
+      kind: item.kind ?? "file",
+      type: item.type ?? item.file?.type ?? "",
+      getAsFile: () => item.file ?? null,
+    })),
+  };
+  await act(async () => {
+    fireEvent(textArea(), event);
+    await tick();
+  });
+  return event;
+}
+
 async function clickSend(times = 1) {
   await act(async () => {
     for (let i = 0; i < times; i += 1) {
@@ -598,6 +637,7 @@ beforeEach(async () => {
   imageHold = false;
   heldReaders = [];
   heldImages = [];
+  pasteFallbackDataUrls.clear();
   // 上一用例的图片弹窗(ui-lib 直接挂到 body)不得串场;toast 只按文本断言,
   // 不参与结构查询,故无需清理
   document.querySelectorAll(".modal-mask").forEach((modal) => modal.remove());
@@ -1210,5 +1250,363 @@ describe("I3-A 附件状态生命周期(I3-MEM)", () => {
       reloaded.messages.every((m) => getMessageImages(m).length === 0),
     ).toBe(true);
     expect(JSON.stringify(reloaded.messages)).not.toContain("data:image");
+  });
+});
+
+// ---- I3-B:粘贴图片上传 ----
+
+const urlPasteB = `data:image/png;base64,${"B".repeat(64)}`;
+
+describe("I3-B 粘贴上传(I3B-PASTE)", () => {
+  test("I3B-PASTE-01 纯文本/非图片文件:不 preventDefault、零附件副作用", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    readerHold = true; // 若误触 addFiles,prepare 会挂在 heldReaders 上
+    const textBefore = bodyText();
+
+    const event = await pasteItems([
+      { kind: "string", type: "text/plain" },
+      { kind: "file", type: "text/plain" },
+    ]);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(trayImages()).toHaveLength(0);
+    expect(textArea().value).toBe("");
+    expect(screen.queryByText(Locale.Chat.ImagePreparing)).toBeNull();
+    expect(heldReaders).toHaveLength(0);
+    // toast 容器跨用例累积,不能用 not.toContain —— 用「整页文本零变化」断言零副作用
+    expect(bodyText()).toBe(textBefore);
+  });
+
+  test("I3B-PASTE-02 单张 supported image:preventDefault + tray +1;输入值与焦点不变", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    textArea().focus();
+
+    const event = await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("clip.png", "image/png", 1024, PNG_A),
+      },
+    ]);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(trayImages()).toHaveLength(1);
+    expect(trayHasUrl(PNG_A)).toBe(true);
+    expect(textArea().value).toBe("");
+    expect(document.activeElement).toBe(textArea());
+  });
+
+  test("I3B-PASTE-03 多图:保持剪贴板顺序(禁 sort/dedupe)", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+
+    const urlC = `data:image/jpeg;base64,${"C".repeat(64)}`;
+    await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("b.png", "image/png", 1024, urlPasteB),
+      },
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("a.png", "image/png", 1024, PNG_A),
+      },
+      {
+        kind: "file",
+        type: "image/jpeg",
+        file: fileOf("c.jpg", "image/jpeg", 1024, urlC),
+      },
+    ]);
+    await flush();
+
+    const styles = trayImages().map((el) => el.getAttribute("style") ?? "");
+    expect(styles).toHaveLength(3);
+    expect(styles[0]).toContain(urlPasteB);
+    expect(styles[1]).toContain(PNG_A);
+    expect(styles[2]).toContain(urlC);
+  });
+
+  test("I3B-PASTE-04 既有 3 张 + 粘贴 2 张 → 最多 4 张 + ImageCountExceeded", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    await pickFiles([
+      fileOf("1.png", "image/png", 1024, PNG_A),
+      fileOf("2.png", "image/png", 1024, PNG_A),
+      fileOf("3.png", "image/png", 1024, PNG_A),
+    ]);
+    expect(trayImages()).toHaveLength(3);
+
+    await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("4.png", "image/png", 1024, PNG_A),
+      },
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("5.png", "image/png", 1024, PNG_A),
+      },
+    ]);
+    await flush();
+
+    expect(trayImages()).toHaveLength(4);
+    expect(bodyText()).toContain(Locale.Chat.ImageCountExceeded);
+  });
+
+  test("I3B-PASTE-05 PREPARING:第二次 paste 不启动第二批 prepare", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+
+    readerHold = true;
+    await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("a.png", "image/png", 1024, PNG_A),
+      },
+    ]);
+    expect(heldReaders).toHaveLength(1);
+    expect(screen.queryByText(Locale.Chat.ImagePreparing)).not.toBeNull();
+
+    const second = await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("b.png", "image/png", 1024, urlPasteB),
+      },
+    ]);
+    expect(second.defaultPrevented).toBe(false);
+    expect(heldReaders).toHaveLength(1);
+
+    await act(async () => {
+      releaseReaders();
+      await tick();
+      await tick();
+    });
+    expect(trayImages()).toHaveLength(1);
+    expect(trayHasUrl(PNG_A)).toBe(true);
+  });
+
+  test("I3B-PASTE-06 SUBMITTING(POST 在途):paste 不收图、不 preventDefault", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    await pickFiles([fileOf("a.png", "image/png", 1024, PNG_A)]);
+
+    const hold = holdSend("c-1");
+    await clickSend();
+    expect(sendCalls("c-1")).toHaveLength(1);
+    expect(sendDisabled()).toBe(true);
+
+    const event = await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("b.png", "image/png", 1024, urlPasteB),
+      },
+    ]);
+    expect(event.defaultPrevented).toBe(false);
+    expect(trayImages()).toHaveLength(1);
+
+    await releaseSend(hold);
+    expect(trayImages()).toHaveLength(0);
+  });
+
+  test("I3B-PASTE-07 pendingRequestId(Stop):paste 不收图", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    await pickFiles([fileOf("a.png", "image/png", 1024, PNG_A)]);
+
+    const hold = holdSend("c-1");
+    await clickSend();
+    await releaseSend(hold);
+    expect(sessionOf("c-1").pendingRequestId).toBe("r-1");
+    expect(isStopButton()).toBe(true);
+    expect(trayImages()).toHaveLength(0);
+
+    const event = await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("b.png", "image/png", 1024, PNG_A),
+      },
+    ]);
+    expect(event.defaultPrevented).toBe(false);
+    expect(trayImages()).toHaveLength(0);
+    expect(isStopButton()).toBe(true);
+  });
+
+  test("I3B-PASTE-08 慢压缩 + SWITCH:旧 paste 结果不得进入新会话", async () => {
+    server.conversations = [conversation("c-1"), conversation("c-2", 0)];
+    applySessions([makeSession({ id: "c-1" }), makeSession({ id: "c-2" })]);
+    await renderChat();
+
+    imageHold = true;
+    await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("big.png", "image/png", 600 * 1024, PNG_A),
+      },
+    ]);
+    expect(heldImages).toHaveLength(1);
+    expect(screen.queryByText(Locale.Chat.ImagePreparing)).not.toBeNull();
+
+    await switchTo(1);
+    expect(trayImages()).toHaveLength(0);
+
+    await act(async () => {
+      releaseImages();
+      await tick();
+      await tick();
+    });
+    expect(trayImages()).toHaveLength(0);
+    expect(screen.queryByText(Locale.Chat.ImagePreparing)).toBeNull();
+    expect(sendDisabled()).toBe(false);
+  });
+
+  test("I3B-PASTE-09 草稿 paste → Send:promotion preserve + POST attachments 正确", async () => {
+    applySessions([draftSession()]);
+    await renderChat();
+    await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("clip.png", "image/png", 1024, PNG_A),
+      },
+    ]);
+    expect(trayImages()).toHaveLength(1);
+
+    const hold = holdSend("c-new-1");
+    await clickSend();
+    expect(sessionOf("c-new-1").draft).toBe(false);
+    expect(trayImages()).toHaveLength(1); // remount 不清附件
+    expect(sendCalls("c-new-1")[0].body.attachments).toEqual([
+      { name: "clip.png", mimeType: "image/png", data: PNG_A },
+    ]);
+
+    await releaseSend(hold);
+    expect(trayImages()).toHaveLength(0);
+    expect(isStopButton()).toBe(true);
+  });
+
+  test("I3B-PASTE-10 unsupported image:复用 ImageTypeUnsupported、不入 tray、不 preventDefault", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+
+    const event = await pasteItems([
+      {
+        kind: "file",
+        type: "image/svg+xml",
+        file: fileOf("icon.svg", "image/svg+xml", 1024, PNG_A),
+      },
+    ]);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(trayImages()).toHaveLength(0);
+    expect(bodyText()).toContain(Locale.Chat.ImageTypeUnsupported);
+  });
+
+  test("I3B-PASTE-11 supported image + text:图片优先(preventDefault + 入 tray)", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+
+    const event = await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("clip.png", "image/png", 1024, PNG_A),
+      },
+      { kind: "string", type: "text/plain" },
+    ]);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(trayImages()).toHaveLength(1);
+  });
+
+  test("I3B-PASTE-12 粘贴图 → Send:POST attachments 正确、发送链路照常收口", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    await pasteItems([
+      {
+        kind: "file",
+        type: "image/png",
+        file: fileOf("clip.png", "image/png", 1024, PNG_A),
+      },
+    ]);
+
+    const hold = holdSend("c-1");
+    await clickSend();
+    expect(sendCalls("c-1")).toHaveLength(1);
+    expect(sendCalls("c-1")[0].body.attachments).toEqual([
+      { name: "clip.png", mimeType: "image/png", data: PNG_A },
+    ]);
+
+    await releaseSend(hold);
+    expect(trayImages()).toHaveLength(0);
+    expect(isStopButton()).toBe(true);
+    expect(sessionOf("c-1").pendingRequestId).toBe("r-1");
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  test("I3B-PASTE-13 空 filename:补名为 paste-image.<ext>(与 MIME 一致)并随 POST 上报", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    pasteFallbackDataUrls.set("paste-image.png", PNG_A);
+    pasteFallbackDataUrls.set("paste-image.jpg", JPEG_OUT);
+
+    await pasteItems([
+      { kind: "file", type: "image/png", file: fileOf("", "image/png", 1024) },
+      { kind: "file", type: "image/jpeg", file: fileOf("", "image/jpeg", 1024) },
+    ]);
+    await flush();
+    expect(trayImages()).toHaveLength(2);
+
+    const hold = holdSend("c-1");
+    await clickSend();
+    expect(sendCalls("c-1")[0].body.attachments).toEqual([
+      { name: "paste-image.png", mimeType: "image/png", data: PNG_A },
+      { name: "paste-image.jpg", mimeType: "image/jpeg", data: JPEG_OUT },
+    ]);
+    await releaseSend(hold);
+    expect(trayImages()).toHaveLength(0);
+  });
+
+  test("I3B-PASTE-14 unsupported image + text:不 preventDefault(不得双重丢失)", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+
+    const event = await pasteItems([
+      {
+        kind: "file",
+        type: "image/svg+xml",
+        file: fileOf("icon.svg", "image/svg+xml", 1024, PNG_A),
+      },
+      { kind: "string", type: "text/plain" },
+    ]);
+    await flush();
+
+    // jsdom 不执行浏览器默认文本插入 → 「文本最终进入 textarea」由 REAL-I3B-08 证明
+    expect(event.defaultPrevented).toBe(false);
+    expect(trayImages()).toHaveLength(0);
+    expect(bodyText()).toContain(Locale.Chat.ImageTypeUnsupported);
   });
 });

@@ -496,6 +496,44 @@ export type AttachmentController = {
   submit: (text: string) => void;
 };
 
+/** I3-B:I3-A 支持集的派生视图(唯一真值仍是 utils/attachment.ts ATTACHMENT_ACCEPT) */
+const ACCEPTED_ATTACHMENT_MIME_TYPES = new Set(ATTACHMENT_ACCEPT.split(","));
+
+/** I3-B:clipboard File 允许空名,空名补名表(仅 I3-A 支持 MIME;F9 名实相符) */
+const PASTE_IMAGE_NAME_BY_MIME = new Map<string, string>([
+  ["image/png", "paste-image.png"],
+  ["image/jpeg", "paste-image.jpg"],
+  ["image/webp", "paste-image.webp"],
+  ["image/gif", "paste-image.gif"],
+]);
+
+/** I3-B:剪贴板 → File[](只做事件源适配;最终 MIME 校验在 prepareAttachment) */
+function extractClipboardImages(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const files: File[] = [];
+  for (let index = 0; index < data.items.length; index += 1) {
+    const item = data.items[index];
+    if (item.kind !== "file" || !item.type.toLowerCase().startsWith("image/")) {
+      continue;
+    }
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
+}
+
+function normalizeClipboardImageNames(files: File[]): File[] {
+  return files.map((file) => {
+    if (file.name !== "") return file;
+    const fallbackName = PASTE_IMAGE_NAME_BY_MIME.get(file.type.toLowerCase());
+    if (fallbackName === undefined) return file;
+    return new File([file], fallbackName, {
+      type: file.type,
+      lastModified: file.lastModified,
+    });
+  });
+}
+
 function _Chat(props: { attachment: AttachmentController }) {
   const attachment = props.attachment;
   type RenderMessage = ChatMessage & { preview?: boolean };
@@ -603,6 +641,31 @@ function _Chat(props: { attachment: AttachmentController }) {
         onSearch(searchText);
       }
     }
+  };
+
+  // I3-B:三阶段 gate —— picker(uploadDisabled)与 paste 共用同一判据
+  const attachmentDisabled =
+    attachment.isPreparingImages ||
+    attachment.isSubmittingMessage ||
+    session.pendingRequestId !== undefined;
+
+  // I3-B:粘贴图片 = 纯适配层;校验/压缩/限额/epoch 全在 I3-A addFiles 链路。
+  // gate 命中时不收图也不 preventDefault(文字仍走浏览器默认粘贴);
+  // 仅 supported image 获得「图片优先」(unsupported 交给 prepareAttachment 拒绝,
+  // 不得连带吞掉剪贴板文本)。
+  const onPasteImages = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (attachmentDisabled) return;
+    const files = normalizeClipboardImageNames(
+      extractClipboardImages(event.clipboardData),
+    );
+    if (files.length === 0) return;
+    const hasSupportedImage = files.some((file) =>
+      ACCEPTED_ATTACHMENT_MIME_TYPES.has(file.type.toLowerCase()),
+    );
+    if (hasSupportedImage) {
+      event.preventDefault();
+    }
+    attachment.addFiles(files);
   };
 
   const doSubmit = (userInput: string) => {
@@ -1312,11 +1375,7 @@ function _Chat(props: { attachment: AttachmentController }) {
                 }}
                 setShowShortcutKeyModal={setShowShortcutKeyModal}
                 uploadImage={() => fileInputRef.current?.click()}
-                uploadDisabled={
-                  attachment.isPreparingImages ||
-                  attachment.isSubmittingMessage ||
-                  session.pendingRequestId !== undefined
-                }
+                uploadDisabled={attachmentDisabled}
                 uploadInProgress={attachment.isPreparingImages}
               />
               <input
@@ -1374,6 +1433,7 @@ function _Chat(props: { attachment: AttachmentController }) {
                   className={styles["chat-input"]}
                   placeholder={Locale.Chat.Input(submitKey)}
                   onInput={(e) => onInput(e.currentTarget.value)}
+                  onPaste={onPasteImages}
                   value={userInput}
                   onKeyDown={onInputKeyDown}
                   onFocus={scrollToBottom}
