@@ -46,12 +46,9 @@ function conversation(
     id,
     title,
     status,
-    provider: "gemini",
-    providerConversationUrl: null,
     preferredModelKey: null,
     createdAt: STAMP,
     updatedAt: STAMP,
-    deletedAt: status === "DELETED" ? STAMP : null,
   };
 }
 
@@ -72,6 +69,7 @@ function message(
     createdAt: STAMP,
     updatedAt: STAMP,
     request: null,
+    attachmentCount: 0,
     ...extra,
   };
 }
@@ -91,6 +89,7 @@ function request(
     status,
     errorCode: null,
     errorMessage: null,
+    attachmentCount: 0,
     createdAt: STAMP,
     updatedAt: STAMP,
   };
@@ -713,7 +712,7 @@ describe("第 7 阶段:NextChat 以 Backend API 为唯一聊天数据源", () =>
       statusFrame("req-2", {
         status: "FAILED",
         requestStatus: "FAILED",
-        errorCode: "PROVIDER_LOGIN_REQUIRED",
+        errorCode: "CHAT_FAILED",
       }),
     );
     await tick();
@@ -721,10 +720,8 @@ describe("第 7 阶段:NextChat 以 Backend API 为唯一聊天数据源", () =>
     const failed = assistantMessage();
     expect(failed.streaming).toBe(false);
     expect(failed.isError).toBe(true);
-    expect(failed.errorCode).toBe("PROVIDER_LOGIN_REQUIRED");
-    expect(errorTextForCode(failed.errorCode)).toBe(
-      "Gemini 未登录,请在服务端浏览器里重新登录",
-    );
+    expect(failed.errorCode).toBe("CHAT_FAILED");
+    expect(errorTextForCode(failed.errorCode)).toBe("请求失败,请重试。");
   });
 
   test("⑤ 刷新后从后端恢复历史消息", async () => {
@@ -3294,13 +3291,13 @@ describe("PAG-2:Message 历史分页(设计 §二十九 store 矩阵)", () => {
     expect(session.messageNextCursor).toBeNull();
     expect(session.messageTotalCount).toBe(0);
 
-    postHold.release(() => fail(500, "PROVIDER_LOGIN_REQUIRED", "not logged in"));
+    postHold.release(() => fail(500, "CHAT_FAILED", "Chat request failed."));
     await sending;
     await tick();
     session = useChatStore.getState().sessions[0]!;
     const bubble = session.messages[session.messages.length - 1]!;
     expect(bubble.isError).toBe(true);
-    expect(bubble.errorCode).toBe("PROVIDER_LOGIN_REQUIRED");
+    expect(bubble.errorCode).toBe("CHAT_FAILED");
     expect(bubble.position).toBeUndefined();
     expect(session.messageTotalCount).toBe(0);
     // displayedCount 基础:totalCount(0)+ transient(1)
@@ -4605,7 +4602,7 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
     const hold = holdPost();
     const sending = useChatStore.getState().onUserInput("失败", [imageA]);
     await tick();
-    hold.release(() => fail(503, "PROVIDER_BUSY", "busy"));
+    hold.release(() => fail(503, "SERVICE_BUSY", "Service is busy."));
 
     const accepted = await sending;
     await flush();
@@ -4617,8 +4614,8 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
     expect(usersOf("c-1")).toHaveLength(usersBefore); // 未注入新 USER
     const bubble = assistantsOf("c-1").at(-1)!;
     expect(bubble.isError).toBe(true);
-    expect(bubble.errorCode).toBe("PROVIDER_BUSY");
-    expect(errorTextForCode(bubble.errorCode)).toBe("浏览器正忙,稍后再试");
+    expect(bubble.errorCode).toBe("SERVICE_BUSY");
+    expect(errorTextForCode(bubble.errorCode)).toBe("服务暂时繁忙,请稍后重试。");
   });
 
   test("I3-SEND-07 注入渲染 = MultimodalContent[](text 在前,image_url 依次在后)", async () => {
@@ -4682,9 +4679,9 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
       text: "仅支持 PNG/JPEG/WebP/GIF",
     },
     {
-      code: "ATTACHMENT_CAPACITY_EXCEEDED",
+      code: "SERVICE_BUSY",
       status: 503,
-      text: "服务端附件队列已满,请稍后重试",
+      text: "服务暂时繁忙,请稍后重试。",
     },
   ];
 
@@ -4718,18 +4715,18 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
     },
   );
 
-  const PROVIDER_ERROR_CODES: { code: string; text: string }[] = [
+  const TERMINAL_ERROR_CODES: { code: string; text: string }[] = [
     {
-      code: "PROVIDER_ATTACHMENT_FAILED",
-      text: "Gemini 图片上传失败,请重试",
+      code: "CHAT_FAILED",
+      text: "请求失败,请重试。",
     },
     {
-      code: "PROVIDER_ATTACHMENT_TIMEOUT",
-      text: "Gemini 图片上传超时,请重试",
+      code: "REQUEST_TIMEOUT",
+      text: "请求超时,请重试。",
     },
   ];
 
-  test.each(PROVIDER_ERROR_CODES)(
+  test.each(TERMINAL_ERROR_CODES)(
     "I3-ERROR-05..06 $code:POST 已 accepted,Provider 终态 → 文案 + pending 不恢复",
     async ({ code, text }) => {
       await bootstrapConversation("c-1", 0);
@@ -4766,7 +4763,7 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
     const hold = holdPost();
     const sending = useChatStore.getState().onUserInput("", [imageA]);
     await tick();
-    hold.release(() => fail(503, "ATTACHMENT_CAPACITY_EXCEEDED", "full"));
+    hold.release(() => fail(503, "SERVICE_BUSY", "Service is busy."));
     expect(await sending).toBe(false);
     await flush();
 
@@ -4783,16 +4780,14 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
       statusFrame(requestId, {
         status: "FAILED",
         requestStatus: "FAILED",
-        errorCode: "PROVIDER_ATTACHMENT_FAILED",
+        errorCode: "CHAT_FAILED",
         errorMessage: "provider boom",
       }),
     );
     await flush();
     expect(sendCalls()).toHaveLength(2); // 终态后无自动重发
     expect(sessionOf("c-1").pendingRequestId).toBeUndefined();
-    expect(assistantsOf("c-1").at(-1)!.errorCode).toBe(
-      "PROVIDER_ATTACHMENT_FAILED",
-    );
+    expect(assistantsOf("c-1").at(-1)!.errorCode).toBe("CHAT_FAILED");
   });
 
   test("I3-SEND-09A 窗口 A(apply 的 set 之前抛)→ canonical reset 为 no-op 后 recovery 重建", async () => {

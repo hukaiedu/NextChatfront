@@ -25,17 +25,19 @@ export type BackendRequestStatus =
   | "TIMEOUT"
   | "CANCELLED";
 
+/**
+ * V1.3-C:与 Backend B3-2 Public DTO 逐字段对齐的会话形状。
+ * 后端已不再返回 userId / provider / providerConversationUrl / deletedAt(Internal-only),
+ * 前端不得再声明或依赖它们。
+ */
 export interface BackendConversation {
   id: string;
   title: string;
   status: ConversationStatus | "DELETED";
-  provider: string;
-  providerConversationUrl: string | null;
   /** M4:会话维度的模型偏好;null = 未指定(默认模型) */
   preferredModelKey: string | null;
   createdAt: string;
   updatedAt: string;
-  deletedAt: string | null;
 }
 
 /** M4:GET /api/provider/models 返回的目录项(字段与后端 GeminiModelOption 对应) */
@@ -50,45 +52,6 @@ export interface BackendModelOption {
 export interface BackendModelCatalog {
   models: BackendModelOption[];
   currentModelKey: string | null;
-}
-
-/** 后端 Playwright 浏览器实例的生命周期状态 */
-export type BackendBrowserState =
-  | "RUNNING"
-  | "STARTING"
-  | "RESTARTING"
-  | "STOPPED"
-  | "FAILED";
-
-export interface BackendBrowserError {
-  code: string;
-  message?: string | null;
-  /** 该错误发生时间(ISO) */
-  at?: string | null;
-}
-
-/**
- * GET /api/browser/status 的负载。
- *
- * 除 `state` 外全部可选:后端字段缺失时 UI 显示占位符,而不是整块面板报错。
- */
-export interface BackendBrowserStatus {
-  state: BackendBrowserState;
-  /** "chromium" / "chrome" / "msedge" */
-  browserType?: string | null;
-  headless?: boolean | null;
-  /** 持久化 Profile 目录,相对后端工作目录 */
-  profileDir?: string | null;
-  /** 本次浏览器启动时间(ISO) */
-  startedAt?: string | null;
-  uptimeMs?: number | null;
-  /** Gemini 登录态;null = 后端未探测 */
-  providerLoggedIn?: boolean | null;
-  /** 正在 PENDING / PROCESSING / CANCELLING 的 Request 数 */
-  activeRequests?: number | null;
-  lastError?: BackendBrowserError | null;
-  /** 后端生成该快照的时间(ISO),用于判断数据新鲜度 */
-  observedAt?: string | null;
 }
 
 export interface BackendRequestBrief {
@@ -110,10 +73,10 @@ export interface BackendMessage {
   /** 只有 ASSISTANT 消息带;USER 消息固定 null */
   request?: BackendRequestBrief | null;
   /**
-   * I3.5:USER 消息提交时携带的图片份数(原图字节从未持久化,只留份数)。
-   * optional:旧后端不返回时为 undefined,消费侧按 0 兜底。
+   * I3.5:消息携带的图片份数(原图字节从未持久化,只留份数)。
+   * B3-2 起是 Public DTO 的固定字段(后端始终返回)。
    */
-  attachmentCount?: number;
+  attachmentCount: number;
 }
 
 export interface BackendRequest {
@@ -124,6 +87,8 @@ export interface BackendRequest {
   status: BackendRequestStatus;
   errorCode: string | null;
   errorMessage: string | null;
+  /** V1.2 I3.5:历史图片份数判据(Public DTO 固定字段) */
+  attachmentCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -157,8 +122,12 @@ export class BackendApiError extends Error {
 }
 
 /**
- * 全局 401 回调(SEC-1 §11.2):业务 API 收到 AUTH_REQUIRED 时触发。
+ * 全局 401 回调:业务 API 收到 AUTH_REQUIRED 时触发。
  * 由 auth store 经 setUnauthorizedHandler 注册,避免 store ↔ client 循环依赖。
+ *
+ * V1.3-C §14:回调只做「标记当前 identity 失效 → 重新进入 bootstrap」。
+ * **绝不自动重放失败的业务请求** —— 自动重放会换掉 owner、重复发送消息。
+ * 调用方(store/组件)自己决定提示与重试。
  */
 let unauthorizedHandler: (() => void) | null = null;
 
@@ -166,7 +135,7 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
 
-/** 仅业务 API 的 401 触发全局登出;auth 端点自身(如登录密码错)不触发(§11.2) */
+/** 仅业务 API 的 401 触发身份刷新;auth 端点自身(登录密码错 / anonymous 被拒)不触发(§11.2) */
 function notifyUnauthorizedIfNeeded(
   path: string,
   status: number,
@@ -197,7 +166,11 @@ export function newIdempotencyKey(): string {
     .slice(2, 10)}`;
 }
 
-async function call<T>(
+/**
+ * Public / Admin 两个客户端共用的低层请求器:统一前缀、统一错误信封、统一 401 通知。
+ * admin-api.ts 复用它,避免出现第二套错误解析逻辑。
+ */
+export async function callBackend<T>(
   path: string,
   init: {
     method?: string;
@@ -269,14 +242,16 @@ export async function listConversations(
 export function createConversation(
   title?: string,
 ): Promise<BackendConversation> {
-  return call<BackendConversation>("/conversations", {
+  return callBackend<BackendConversation>("/conversations", {
     method: "POST",
     body: title ? { title } : {},
   });
 }
 
 export function getConversation(id: string): Promise<BackendConversation> {
-  return call<BackendConversation>(`/conversations/${encodeURIComponent(id)}`);
+  return callBackend<BackendConversation>(
+    `/conversations/${encodeURIComponent(id)}`,
+  );
 }
 
 export function patchConversation(
@@ -288,14 +263,17 @@ export function patchConversation(
     preferredModelKey?: string | null;
   },
 ): Promise<BackendConversation> {
-  return call<BackendConversation>(`/conversations/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    body: patch,
-  });
+  return callBackend<BackendConversation>(
+    `/conversations/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: patch,
+    },
+  );
 }
 
 export function deleteConversation(id: string): Promise<void> {
-  return call<void>(`/conversations/${encodeURIComponent(id)}`, {
+  return callBackend<void>(`/conversations/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
@@ -351,7 +329,7 @@ export function sendMessage(
   modelKey?: string,
   attachments?: SendMessageAttachment[],
 ): Promise<SendMessageResult> {
-  return call<SendMessageResult>(
+  return callBackend<SendMessageResult>(
     `/conversations/${encodeURIComponent(conversationId)}/messages`,
     {
       method: "POST",
@@ -368,7 +346,7 @@ export function sendMessage(
 
 /** POST /api/requests/:id/cancel(prd §8.9) */
 export function cancelRequest(requestId: string): Promise<BackendRequest> {
-  return call<BackendRequest>(
+  return callBackend<BackendRequest>(
     `/requests/${encodeURIComponent(requestId)}/cancel`,
     { method: "POST" },
   );
@@ -376,37 +354,37 @@ export function cancelRequest(requestId: string): Promise<BackendRequest> {
 
 /** GET /api/provider/models(M4);Provider 非就绪时抛 BackendApiError */
 export function listProviderModels(): Promise<BackendModelCatalog> {
-  return call<BackendModelCatalog>("/provider/models");
+  return callBackend<BackendModelCatalog>("/provider/models");
 }
 
-/** GET /api/browser/status:服务端浏览器实例状态快照 */
-export function getBrowserStatus(): Promise<BackendBrowserStatus> {
-  return call<BackendBrowserStatus>("/browser/status");
-}
+/** V1.3:后端身份类型;REGISTERED 目前不会产生,保留以兼容未来 */
+export type BackendUserType = "ANONYMOUS" | "ADMIN" | "REGISTERED";
 
-/**
- * POST /api/browser/restart:重启服务端浏览器并返回重启后的状态。
- * 后端可能耗时较长(关旧实例 + 起新实例 + 打开 Gemini 页面)。
- */
-export function restartBrowser(): Promise<BackendBrowserStatus> {
-  return call<BackendBrowserStatus>("/browser/restart", { method: "POST" });
-}
-
-/** GET /api/auth/session 的负载(§四);disabled 模式恒 authenticated:true */
+/** GET /api/auth/session 的负载(§四) */
 export interface AuthSessionInfo {
   authenticated: boolean;
+  /** V1.3-B3-2:身份类型;未认证分支后端不返回该字段,消费侧按 null 兜底 */
+  userType?: BackendUserType | null;
   /** Session 过期时间(ISO);未认证或 disabled 模式为 null */
   expiresAt: string | null;
 }
 
 /** GET /api/auth/session:永不 401,启动探测与 SSE 重连探测共用 */
 export function getAuthSession(): Promise<AuthSessionInfo> {
-  return call<AuthSessionInfo>("/auth/session");
+  return callBackend<AuthSessionInfo>("/auth/session");
+}
+
+/**
+ * POST /api/auth/anonymous(V1.3-B2 §8):无/无效 Cookie → 建匿名 User+Session 并 Set-Cookie。
+ * 幂等:Cookie 已有效时直接返回既有身份。DISABLED Cookie → 401 AUTH_REQUIRED(不新建 User)。
+ */
+export function bootstrapAnonymous(): Promise<AuthSessionInfo> {
+  return callBackend<AuthSessionInfo>("/auth/anonymous", { method: "POST" });
 }
 
 /** POST /api/auth/login:密码错 → 401,限流 → 429(信封 code + retryAfterSeconds) */
 export function login(password: string): Promise<AuthSessionInfo> {
-  return call<AuthSessionInfo>("/auth/login", {
+  return callBackend<AuthSessionInfo>("/auth/login", {
     method: "POST",
     body: { password },
   });
@@ -414,7 +392,7 @@ export function login(password: string): Promise<AuthSessionInfo> {
 
 /** POST /api/auth/logout:幂等 204,清 Session Cookie */
 export function logout(): Promise<void> {
-  return call<void>("/auth/logout", { method: "POST" });
+  return callBackend<void>("/auth/logout", { method: "POST" });
 }
 
 /** 后端 SSE 帧的 data 负载 */

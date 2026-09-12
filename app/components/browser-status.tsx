@@ -1,23 +1,24 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import clsx from "clsx";
 import styles from "./browser-status.module.scss";
 
 import ReloadIcon from "../icons/reload.svg";
 import Locale from "../locales";
-import {
-  BackendBrowserState,
-  BackendBrowserStatus,
-} from "../client/backend-api";
+import { AdminBrowserState, AdminBrowserStatus } from "../client/admin-api";
 import {
   isUnsupportedBrowserApi,
   retainBrowserStatusPolling,
   useBrowserStore,
 } from "../store/browser";
-import { errorTextForCode } from "../store/chat";
 import { IconButton } from "./button";
-import { List, ListItem, Popover, showConfirm, showToast } from "./ui-lib";
+import { List, ListItem, showConfirm, showToast } from "./ui-lib";
 
-const STATE_LABEL: Record<BackendBrowserState, string> = {
+/**
+ * V1.3-C §40/§41:服务端浏览器运维面板。原「Public 设置页 / 聊天头部」入口已移除,
+ * 本组件只允许被 /admin 控制台挂载 —— 快照含 profileDir / providerLoggedIn 等运维字段。
+ */
+
+const STATE_LABEL: Record<AdminBrowserState, string> = {
   RUNNING: Locale.Browser.State.RUNNING,
   STARTING: Locale.Browser.State.STARTING,
   RESTARTING: Locale.Browser.State.RESTARTING,
@@ -25,7 +26,7 @@ const STATE_LABEL: Record<BackendBrowserState, string> = {
   FAILED: Locale.Browser.State.FAILED,
 };
 
-const STATE_HINT: Record<BackendBrowserState, string> = {
+const STATE_HINT: Record<AdminBrowserState, string> = {
   RUNNING: Locale.Browser.Hint.RUNNING,
   STARTING: Locale.Browser.Hint.STARTING,
   RESTARTING: Locale.Browser.Hint.RESTARTING,
@@ -33,7 +34,7 @@ const STATE_HINT: Record<BackendBrowserState, string> = {
   FAILED: Locale.Browser.Hint.FAILED,
 };
 
-const DOT_CLASS: Record<BackendBrowserState, string> = {
+const DOT_CLASS: Record<AdminBrowserState, string> = {
   RUNNING: styles["dot-running"],
   STARTING: styles["dot-busy"],
   RESTARTING: styles["dot-busy"],
@@ -43,7 +44,7 @@ const DOT_CLASS: Record<BackendBrowserState, string> = {
 
 const UNKNOWN = Locale.Browser.Empty;
 
-export function browserStateView(status: BackendBrowserStatus | null) {
+export function browserStateView(status: AdminBrowserStatus | null) {
   return {
     label: status ? STATE_LABEL[status.state] : Locale.Browser.State.UNKNOWN,
     hint: status ? STATE_HINT[status.state] : Locale.Browser.Hint.UNKNOWN,
@@ -93,7 +94,7 @@ function formatLoggedIn(loggedIn?: boolean | null): string {
   return Locale.Browser.LoggedIn.Unknown;
 }
 
-function formatBrowserType(status: BackendBrowserStatus | null): string {
+function formatBrowserType(status: AdminBrowserStatus | null): string {
   if (!status?.browserType) return UNKNOWN;
   if (status.headless == null) return status.browserType;
   return `${status.browserType} · ${
@@ -101,7 +102,7 @@ function formatBrowserType(status: BackendBrowserStatus | null): string {
   }`;
 }
 
-function formatLastError(status: BackendBrowserStatus | null): string {
+function formatLastError(status: AdminBrowserStatus | null): string {
   const error = status?.lastError;
   if (!error) return UNKNOWN;
   const detail = error.message ? `: ${error.message}` : "";
@@ -109,7 +110,7 @@ function formatLastError(status: BackendBrowserStatus | null): string {
 }
 
 export function browserStatusRows(
-  status: BackendBrowserStatus | null,
+  status: AdminBrowserStatus | null,
   fetchedAt: number | null,
 ) {
   return [
@@ -152,8 +153,8 @@ export function browserStatusRows(
 }
 
 /**
- * 浏览器状态失败提示:HTTP 404 说明后端还没有这个接口,
- * 与「后端连不上」区分开,避免前端先上线时给出误导性的网络错误。
+ * 浏览器状态失败提示:HTTP 404 说明后端还没有这个接口,与「后端连不上」区分开。
+ * 这是 Admin 面:允许显示后端原始错误码(§36 Admin surface 不受 Public 映射限制)。
  */
 export function browserErrorText(
   code: string | null,
@@ -163,13 +164,9 @@ export function browserErrorText(
   if (isUnsupportedBrowserApi(code, httpStatus)) {
     return Locale.Browser.Unsupported;
   }
-  return `${Locale.Browser.FetchFailed} · ${errorTextForCode(code)}`;
+  return `${Locale.Browser.FetchFailed} · ${code}`;
 }
 
-/**
- * 浏览器状态的共享数据源:挂载即拉取一次,并与其他展示位共用一个轮询定时器。
- * 状态只来自后端,不落本地存储。
- */
 function useBrowserStatusPanel() {
   const {
     status,
@@ -209,8 +206,8 @@ function useBrowserStatusPanel() {
   };
 }
 
-/** 设置页:完整的浏览器状态面板 */
-export function BrowserStatusSection() {
+/** /admin:完整浏览器运维面板(状态 + 明细 + 刷新/重启) */
+export function AdminBrowserPanel() {
   const {
     status,
     fetchState,
@@ -264,74 +261,5 @@ export function BrowserStatusSection() {
         </div>
       </ListItem>
     </List>
-  );
-}
-
-/** 聊天头部:状态胶囊 + 点击展开的详情气泡 */
-export function BrowserStatusButton() {
-  const { status, fetchState, restarting, fetchedAt, errorText, restart } =
-    useBrowserStatusPanel();
-  const [open, setOpen] = useState(false);
-  const view = browserStateView(status);
-  const rows = browserStatusRows(status, fetchedAt);
-  const tip = errorText ?? view.hint;
-
-  return (
-    <div className="window-action-button">
-      <Popover
-        open={open}
-        onClose={() => setOpen(false)}
-        content={
-          <div className={styles["status-popover"]}>
-            <div className={styles["status-popover-header"]}>
-              <div className={styles["state-badge"]}>
-                <span className={clsx(styles.dot, view.dotClass)} />
-                <span>{Locale.Browser.Title}</span>
-              </div>
-              <div className={styles["status-popover-hint"]}>
-                {tip}
-                {restarting ? ` · ${Locale.Browser.State.RESTARTING}` : ""}
-              </div>
-            </div>
-            <div className={styles["status-popover-rows"]}>
-              {rows.map((row) => (
-                <div className={styles["status-row"]} key={row.label}>
-                  <div className={styles["status-row-label"]}>{row.label}</div>
-                  <div className={styles["status-row-value"]} title={row.value}>
-                    {row.value}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className={styles["status-popover-actions"]}>
-              <IconButton
-                aria={Locale.Browser.Actions.Refresh}
-                text={Locale.Browser.Actions.Refresh}
-                bordered
-                disabled={fetchState === "loading"}
-                onClick={() => void useBrowserStore.getState().refresh(true)}
-              />
-              <IconButton
-                aria={Locale.Browser.Actions.Restart}
-                text={Locale.Browser.Actions.Restart}
-                bordered
-                type="danger"
-                disabled={restarting}
-                onClick={restart}
-              />
-            </div>
-          </div>
-        }
-      >
-        <IconButton
-          aria={Locale.Browser.Title}
-          icon={<span className={clsx(styles.dot, view.dotClass)} />}
-          text={view.label}
-          bordered
-          title={tip}
-          onClick={() => setOpen((value) => !value)}
-        />
-      </Popover>
-    </div>
   );
 }

@@ -34,12 +34,9 @@ function conversation(
     id,
     title,
     status,
-    provider: "gemini",
-    providerConversationUrl: null,
     preferredModelKey,
     createdAt: STAMP,
     updatedAt: STAMP,
-    deletedAt: null,
   };
 }
 
@@ -59,6 +56,7 @@ function message(
     createdAt: STAMP,
     updatedAt: STAMP,
     request: null,
+    attachmentCount: 0,
   };
 }
 
@@ -81,7 +79,7 @@ const server = {
   models: MODELS,
   /** 打开的会话 id;null = 没有活动会话 */
   openConversationId: null as string | null,
-  failModels: false as false | "GENERIC" | "PROVIDER_NOT_READY",
+  failModels: false as false | "GENERIC" | "SERVICE_BUSY",
   failPatch: false,
   failCreate: false,
 };
@@ -114,17 +112,17 @@ function fail(status: number, code: string, errorMessage: string) {
 function route(url: string, method: string, body: any): any {
   if (url === "/backend-api/provider/models" && method === "GET") {
     if (server.failModels === "GENERIC") {
-      return fail(500, "INTERNAL_ERROR", "internal error");
+      return fail(500, "CHAT_FAILED", "Chat request failed.");
     }
-    if (server.failModels === "PROVIDER_NOT_READY") {
-      return fail(500, "PROVIDER_NOT_READY", "provider not ready");
+    if (server.failModels === "SERVICE_BUSY") {
+      return fail(503, "SERVICE_BUSY", "Service is busy.");
     }
     return reply(200, { data: { models: server.models, currentModelKey: "kB" } });
   }
 
   if (url === "/backend-api/conversations" && method === "POST") {
     if (server.failCreate) {
-      return fail(500, "INTERNAL_ERROR", "create failed");
+      return fail(500, "CHAT_FAILED", "Chat request failed.");
     }
     const id = `conv-${server.conversations.length + 1}`;
     const conv = conversation(id, body?.title ?? "默认话题");
@@ -151,7 +149,7 @@ function route(url: string, method: string, body: any): any {
     if (method === "GET") return reply(200, { data: target });
     if (method === "PATCH") {
       if (server.failPatch) {
-        return fail(500, "PROVIDER_NOT_READY", "patch failed");
+        return fail(400, "VALIDATION_ERROR", "invalid preferredModelKey");
       }
       server.conversations[index] = {
         ...target,
@@ -737,22 +735,58 @@ describe("M4-FIX-07:生成中刷新不打 error", () => {
     expect(useChatStore.getState().modelCatalogStatus).toBe("ready");
   });
 
-  test("M4-29 PROVIDER_NOT_READY → idle(允许重试),其他错误 → error", async () => {
-    // PROVIDER_NOT_READY → idle
-    server.failModels = "PROVIDER_NOT_READY";
+  test("M4-29 SERVICE_BUSY → idle(允许重试),其他 Public 错误 → error", async () => {
+    // V1.3-C:目录暂时不可用的 Public 表达是 SERVICE_BUSY(PROVIDER_NOT_READY 已退役)
+    server.failModels = "SERVICE_BUSY";
     await useChatStore.getState().loadModels();
     expect(useChatStore.getState().modelCatalogStatus).toBe("idle");
 
-    // 其他错误 → error(模拟非 PROVIDER_NOT_READY 的失败)
+    // 其他错误 → error(模拟不可重试的失败)
     const origFetch = globalThis.fetch as jest.Mock;
     (globalThis as any).fetch = jest.fn(async () => ({
       ok: false,
       status: 500,
-      json: async () => ({ error: { code: "INTERNAL_ERROR", message: "boom", requestId: "r" } }),
+      json: async () => ({
+        error: {
+          code: "CHAT_FAILED",
+          message: "Chat request failed.",
+          requestId: "r",
+        },
+      }),
     }));
     await useChatStore.getState().loadModels(true);
     expect(useChatStore.getState().modelCatalogStatus).toBe("error");
 
     (globalThis as any).fetch = origFetch;
+  });
+});
+
+describe("V1.3-C FIX-01A:真实模型 label 仍正常展示", () => {
+  test("M4-30 /provider/models 的 Gemini label 原样渲染且可选中(去后端品牌≠删模型名)", async () => {
+    server.models = [
+      { key: "kg", label: "Gemini 3.6 Flash", selected: true, disabled: false },
+      { key: "kd", label: "DeepSeek V3", selected: false, disabled: false },
+    ];
+    seedSession({ id: "c-1", preferredModelKey: "kg" });
+    await useChatStore.getState().loadModels();
+
+    const { container } = render(<ModelSelectorButton />);
+    // 触发按钮直接显示后端返回的真实 label
+    expect(container.textContent).toContain("Gemini 3.6 Flash");
+
+    fireEvent.click(screen.getByText("Gemini 3.6 Flash").closest("button")!);
+    // 目录行同样保留真实 label,并可点击保存到后端
+    expect(screen.getAllByText("Gemini 3.6 Flash").length).toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(screen.getByText("DeepSeek V3")).toBeInTheDocument();
+    expect(
+      screen.getByText(Locale.Chat.ModelSelector.Default),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("DeepSeek V3"));
+    await tick();
+    expect(patchCalls()).toHaveLength(1);
+    expect(patchCalls()[0].body).toEqual({ preferredModelKey: "kd" });
   });
 });

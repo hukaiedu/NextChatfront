@@ -236,12 +236,9 @@ function conversation(id: string, minuteOffset = 1): BackendConversation {
     id,
     title: `${id} 会话`,
     status: "ACTIVE",
-    provider: "gemini",
-    providerConversationUrl: null,
     preferredModelKey: null,
     createdAt: STAMP,
     updatedAt: new Date(Date.parse(STAMP) - minuteOffset * 60_000).toISOString(),
-    deletedAt: null,
   };
 }
 
@@ -263,6 +260,7 @@ function backendMessage(
     createdAt: STAMP,
     updatedAt: STAMP,
     request: null,
+    attachmentCount: 0,
     ...extra,
   };
 }
@@ -303,6 +301,7 @@ function sendResponse(call: RecordedCall, conversationId: string) {
     status: "PENDING",
     errorCode: null,
     errorMessage: null,
+    attachmentCount: 0,
     createdAt: STAMP,
     updatedAt: STAMP,
   };
@@ -1089,14 +1088,14 @@ describe("I3-A 草稿 promotion(I3-DRAFT)", () => {
     const hold = holdSend("c-new-1");
     await clickSend();
     await releaseSend(hold, () =>
-      fail(503, "ATTACHMENT_CAPACITY_EXCEEDED", "附件队列已满"),
+      fail(503, "SERVICE_BUSY", "Service is busy."),
     );
 
     expect(sessionOf("c-new-1").draft).toBe(false);
     expect(sessionOf("c-new-1").messages.some((m) => m.isError)).toBe(true);
     expect(
       sessionOf("c-new-1").messages.find((m) => m.isError)!.errorCode,
-    ).toBe("ATTACHMENT_CAPACITY_EXCEEDED");
+    ).toBe("SERVICE_BUSY");
     expect(trayImages()).toHaveLength(1);
     expect(sendDisabled()).toBe(false);
     expect(isStopButton()).toBe(false);

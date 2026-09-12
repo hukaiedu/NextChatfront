@@ -147,6 +147,7 @@ function backendMessage(
     createdAt: STAMP,
     updatedAt: STAMP,
     request: null,
+    attachmentCount: 0,
   };
 }
 

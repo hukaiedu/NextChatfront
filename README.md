@@ -69,15 +69,20 @@ Frontend 只负责 UI 和交互;Backend 是 Conversation / Message / Request 的
 ```text
 app/
 ├─ client/
-│  └─ backend-api.ts        # REST / SSE 后端通信客户端
+│  ├─ backend-api.ts        # REST / SSE 后端通信客户端
+│  └─ admin-api.ts          # canonical /backend-api/admin/* 运维调用
 ├─ store/
 │  ├─ chat.ts               # 前端会话状态与 Backend 数据同步
+│  ├─ auth.ts               # 身份 session 真相(服务端为准)+ 登录 / 退出 / 吊销
 │  └─ browser.ts            # 浏览器状态快照 + 共享轮询定时器
 ├─ components/
 │  ├─ chat.tsx              # 聊天主界面
 │  ├─ sidebar.tsx           # 会话列表 / 归档切换
-│  ├─ browser-status.tsx    # 状态面板 + 头部状态胶囊(共用一套展示层)
-│  └─ settings.tsx          # 设置页
+│  ├─ browser-status.tsx    # /admin 用的服务端浏览器面板(展示层)
+│  └─ settings.tsx          # 设置页(无运维面板)
+├─ admin/
+│  ├─ page.tsx              # /admin 管理控制台(ADMIN only)
+│  └─ login/page.tsx        # /admin/login 管理员登录
 └─ api/
    ├─ config/route.ts       # 保留:非敏感 UI 配置
    └─ (其余 Provider / WebDAV 路由已统一 404)
@@ -86,8 +91,10 @@ next.config.mjs             # /backend-api/* rewrite 规则
 ```
 
 - `backend-api.ts`:所有后端请求的唯一出口,只和同源 `/backend-api/*` 说话,无 CORS、无 Provider 鉴权头。
+- `admin-api.ts`:运维调用与 Public 聊天调用物理分开,类型独立,不共享 DTO。
 - `chat.ts`:会话状态机(草稿 / 已加载 / 在途 Request / 归档),与 Backend 数据同步。
-- `browser.ts`:浏览器状态快照、重启动作与引用计数的共享轮询(多个展示位只有一份 15s 轮询)。
+- `auth.ts`:身份只由 `GET /backend-api/auth/session` 决定,本地不落任何凭证。
+- `browser.ts`:浏览器状态快照、重启动作与引用计数的共享轮询(展示位只有一份 15s 轮询)。
 - `next.config.mjs`:`/backend-api/*` 同源代理。
 - `docs/browser-status-api.md`:浏览器状态接口的后端实现规格(交后端 Agent 的交付文档)。
 
@@ -177,7 +184,7 @@ Conversation、Message、Request 全部来自 personChat Backend:
 - 发送消息:`POST /backend-api/conversations/:id/messages`(带 `Idempotency-Key`)
 - 停止生成:`POST /backend-api/requests/:id/cancel`
 - 事件流:`GET /backend-api/requests/:id/events`(SSE)
-- 浏览器状态:`GET /backend-api/browser/status` / `POST /backend-api/browser/restart`(见「浏览器状态」一节)
+- 服务端浏览器状态:不属于聊天主数据,只在 `/admin` 管理控制台按 canonical 路径读取(见「服务端浏览器管理(V1.3-C)」一节)
 
 Frontend **不再将本地 IndexedDB / localStorage 中的聊天记录视为权威数据**。数据库恢复、刷新恢复都以后端为准。
 
@@ -188,8 +195,9 @@ Frontend **不再将本地 IndexedDB / localStorage 中的聊天记录视为权�
 | Theme / UI preference(字号、字体、发送键等) | localStorage | `chat-next-web-config` |
 | Mask(角色预设) | localStorage | `chat-next-web-mask` |
 | Prompt 资源 | localStorage | `chat-next-web-prompt` |
-| 未发送输入 | 内存 | 切换会话时恢复,不落盘 |
-| 浏览器状态快照 | 内存 | 每次进入页面重新拉取,不落盘 |
+| 未发送输入 | localStorage | `unfinished-input-<会话 id>`(仅草稿文本,切换会话时恢复) |
+| 服务端浏览器状态快照 | 内存 | 每次进入页面重新拉取,不落盘 |
+| 登录身份 / Session | HttpOnly Cookie + 内存 store | 前端代码不读 Cookie、不落盘,身份真相只来自 `GET /backend-api/auth/session` |
 | 聊天数据(旧 `chat-next-web-store`) | 不持久化 | 启动时主动清除 |
 
 - Conversation / Message / Request **不作为聊天主数据持久化到本地**。
@@ -222,21 +230,23 @@ POST /backend-api/conversations/:id/messages(得到 Request)
 - **会话偏好**:已落库会话经 `PATCH /backend-api/conversations/:id`(body `preferredModelKey`)保存,乐观更新、失败回滚并提示;「默认模型」= `preferredModelKey=null`,**不是一个伪造的模型 id**。
 - **Draft 语义**:草稿(`draft-*`)里选模型只改内存,**0 后端请求**;首次发送创建 Backend Conversation 时,若草稿带偏好,POST body 显式携带 `modelKey`,后端同事务写入会话偏好与 Request 快照;草稿无偏好则只发 `{content}`。
 - **已落库会话**:普通发送 body 只含 `{content}`,**永不携带 `modelKey`**;后端按会话偏好冻结该次 Request 的 `requestedModelKey`。生成中(PENDING / PROCESSING / CANCELLING)选择器禁用。
-- **stale key 安全**:历史偏好键不在当前目录时,按钮显示「当前模型不可用」,**不自动清除偏好**;此时发送会被后端判 `PROVIDER_MODEL_UNAVAILABLE`(Request 终态 FAILED),UI 显示错误气泡,偏好保持不变。
+- **stale key 安全**:历史偏好键不在当前目录时,按钮显示「当前模型不可用」,**不自动清除偏好**;此时发送会被后端判 `PROVIDER_MODEL_UNAVAILABLE`(内部码,Request 终态 FAILED),Public 信封只回 `CHAT_FAILED`,气泡显示通用错误文案,偏好保持不变。
 - **偏好持久化唯一来源是后端**:localStorage 不存任何模型偏好;页面刷新后偏好与会话历史均从 Backend 恢复。
 
-## 浏览器状态(V1.2)
+## 管理控制台与服务端浏览器(V1.3-C)
 
-服务端 Playwright 浏览器的运行状态由 personChat Backend 提供,前端只做展示与受控重启:
+`/admin`(App Router 真实路由,**不是** HashRouter 里的 `#/…`)是唯一的管理界面;未登录 ADMIN 时跳 `/admin/login` 只输密码。聊天侧栏与设置页不再有运维面板。
 
-- **两个展示位共享一份数据**:设置页顶部的「浏览器状态」面板 + 聊天头部(桌面端)状态胶囊,点胶囊展开详情气泡。
-- **数据来源**:`GET /backend-api/browser/status`(快照)与 `POST /backend-api/browser/restart`(重启成功后直接返回新快照)。
-- **轮询**:挂载时立即拉一次,之后每 15s 一次;多个展示位用引用计数共用**一个**定时器,页面隐藏时跳过本轮但不停表,切回前台即恢复新鲜度。
+- **身份真相**:只来自 `GET /backend-api/auth/session`(HttpOnly Cookie 由浏览器自动携带,前端代码从不读 Cookie);管理员密码不写 localStorage / sessionStorage,不进 URL,不打日志。
+- **canonical 路径**:浏览器状态走 `GET /backend-api/admin/browser/status`,重启走 `POST /backend-api/admin/browser/restart`;Provider 状态 / 打开 / 重启走 `GET /backend-api/admin/provider/status`、`POST /backend-api/admin/provider/open`、`POST /backend-api/admin/provider/restart`(旧 `/backend-api/browser/*`、`/backend-api/provider/status` 等已随后端 alias 退役)。
+- **面板内容**:当前身份与登录状态有效期、浏览器 `state` / 启动时间 / 已运行时长 / 类型 / profileDir / Gemini 登录态 / 进行中的回答 / 最近错误 / 状态更新时间。
+- **Provider 面板**:`state` 取 `STOPPED` / `STARTING` / `LOGIN_REQUIRED` / `READY` / `BUSY` / `ERROR`;只在进入页面时拉一次,靠「刷新」手动更新(不参与上面的 15s 轮询);「打开 Provider」只把后端浏览器页面切到前台,不确认、不写数据;「重启 Provider」先确认再执行,后端以原始错误码拒绝时(如 `503 PROVIDER_NOT_READY`)原样展示,不跳转、不降级成通用文案。
+- **轮询**:挂载时立即拉一次,之后每 15s 一次;页面隐藏时跳过本轮但不停表,切回前台即恢复新鲜度。
 - **逐字段降级**:除 `state` 外全部可选,后端缺哪个字段该行就显示 `—`;首帧之前显示「未知」。
-- **错误区分**:网络错误按 HTTP 状态分流,`404` 视为「当前后端未提供浏览器状态接口,请升级 personChat Backend」,与「连不上后端服务」分开;拉取失败时保留上一次快照不清空。
-- **重启有确认**:先弹窗确认「重启会中断正在进行的回答」再发请求,失败时按后端错误码出中文提示,并立刻强制回读一次真实状态。
-- **不落本地**:状态与登录态只存在于内存 store,localStorage 不写任何浏览器状态。
-- **后端规格**:`docs/browser-status-api.md`(字段语义、状态机、`BROWSER_*` 错误码、并发约束与验收清单)。
+- **错误区分**:网络错误按 HTTP 状态分流,`404` 视为「后端尚未提供 canonical Admin API,请升级 personChat Backend」,与「连不上后端服务」分开;拉取失败时保留上一次快照不清空。
+- **危险操作一律先确认**:重启(提示会中断正在进行的回答)、吊销全部登录状态(`POST /backend-api/admin/sessions/revoke-all`,提示不可撤销,成功后当前 Cookie 失效并回登录页)、退出管理员登录(只注销当前设备)。
+- **不落本地**:浏览器状态与登录态只存在于内存 store,localStorage 不写任何浏览器状态或会话数据。
+- **后端规格**:`docs/browser-status-api.md`(字段语义、状态机、`BROWSER_*` 内部错误码、并发约束与验收清单)。
 
 ## 图片附件(V1.2)
 
@@ -317,24 +327,33 @@ Request 进入 CANCELLING
 
 ## 错误显示
 
-后端错误码由前端映射为中文提示(未列出的直接展示后端 message),常见错误码:
+前端只消费后端 **Public 信封**的错误码(V1.3-C 契约):内部实现码(`PROVIDER_*`、`BROWSER_*`、`DATABASE_ERROR`、`INTERNAL_ERROR` …)在 HTTP 响应体、SSE 帧与 DTO 里都已折成通用码,前端码表因此**不含任何内部码**——出现 `PROVIDER_*` 就说明 Public 契约漏了细节。
 
-| 错误码 | 含义 |
+映射唯一来源:`app/store/chat.ts` 的 `ERROR_TEXT` + `errorTextForCode()` / `backendErrorMessage()`。**未列出的码一律回落到 `请求失败,请重试。`,绝不把后端原始 code 或 message 渲染给用户。**
+
+| 错误码 | 用户文案 |
 | --- | --- |
-| `PROVIDER_LOGIN_REQUIRED` | Gemini 未登录,需在服务端浏览器重新登录 |
-| `PROVIDER_PAGE_CLOSED` | Gemini 页面被关闭 |
-| `PROVIDER_BROWSER_CRASHED` | 服务端浏览器崩溃(自动恢复中) |
-| `PROVIDER_CONVERSATION_UNAVAILABLE` | Gemini 会话失效,请新建会话 |
-| `PROVIDER_RESPONSE_TIMEOUT` | Gemini 回答超时 |
-| `CONVERSATION_REQUEST_IN_PROGRESS` | 同一会话已有回答在进行中 |
-| `SERVER_RESTARTED_DURING_PROCESSING` | 服务重启导致回答中断 |
-| `BROWSER_NOT_RUNNING` | 服务端浏览器未运行,可在浏览器状态面板中重启 |
-| `BROWSER_LAUNCH_FAILED` | 服务端浏览器启动失败,需查看后端日志 |
-| `BROWSER_RESTART_CONFLICT` | 有回答正在生成(或已有重启在途),先停止生成再重启 |
-| `BROWSER_RESTART_FAILED` | 服务端浏览器重启失败,需查看后端日志 |
-| `BROWSER_RESTART_TIMEOUT` | 服务端浏览器重启超时,前端会自动回读一次真实状态 |
-| `NETWORK_ERROR` | 连不上后端服务 |
-| `CANCELLED` | 用户主动取消(正常展示已生成内容,不算错误) |
+| `CHAT_FAILED` | 请求失败,请重试。(也是未知码的兜底) |
+| `SERVICE_BUSY` | 服务暂时繁忙,请稍后重试。 |
+| `REQUEST_TIMEOUT` | 请求超时,请重试。 |
+| `CONVERSATION_NOT_FOUND` | 会话不存在 |
+| `CONVERSATION_DELETED` | 会话已删除 |
+| `CONVERSATION_ARCHIVED` | 会话已归档,请先恢复后再发送 |
+| `CONVERSATION_REQUEST_IN_PROGRESS` | 这个会话还有回答在进行中,请先等它完成 |
+| `REQUEST_NOT_FOUND` | 这个回答已不存在 |
+| `REQUEST_NOT_CANCELLABLE` | 这个回答已经结束,无需停止 |
+| `IDEMPOTENCY_KEY_REUSED` | 这条消息已提交过,请重新发送 |
+| `VALIDATION_ERROR` | 请求内容不符合要求,请检查后重试 |
+| `PAYLOAD_TOO_LARGE` | 图片请求数据过大,请减少图片或缩小后重试 |
+| `ATTACHMENT_TOO_LARGE` | 图片过大、数量过多或总大小超限 |
+| `UNSUPPORTED_ATTACHMENT_TYPE` | 仅支持 PNG/JPEG/WebP/GIF |
+| `AUTH_REQUIRED` | 登录状态已更新,请重试 |
+| `AUTH_FORBIDDEN` | 没有权限执行该操作 |
+| `AUTH_CSRF_REJECTED` | 请求已失效,请刷新页面后重试 |
+| `NETWORK_ERROR` | 网络异常,请稍后重试(前端本地生成,表示连不上后端) |
+
+- `CANCELLED` 不是错误码:用户主动停止时正常展示已生成内容。
+- 「模型不可用」「服务端浏览器未运行」等运维细节改由 `/admin` 管理控制台呈现,聊天界面只给上面的通用文案。
 
 ## 旧接口与旧能力
 
@@ -394,7 +413,8 @@ Backend:
 ## 已知限制
 
 - **Backend 依赖**:没有 personChat Backend,前端无法聊天。
-- **单用户定位**:没有多用户账号体系。
+- **多用户现状**:V1.3 起有「匿名访客 + ADMIN」双身份(Backend DB Session),但**没有**邮箱 / OAuth 注册与账号自助体系。
+- **发布闸门**:**NOT READY FOR PUBLIC INTERNET RELEASE** —— 仍缺 P6 Rate Limit / Quota、Scheduler 公平性、Browser Pool 与多 Gemini Account;`AUTH_ENABLED=false` 时后端只允许 loopback 监听。
 - **Gemini 人工登录**:Gemini 登录态由 Backend Browser Profile 提供,前端无法处理登录。
 - **Gemini DOM 依赖**:Gemini Web 页面改版会影响 Backend 自动化。
 - **单实例**:Backend 当前为单实例架构。
@@ -407,7 +427,11 @@ Frontend **不**保存:
 - Google Cookie
 - Gemini Token
 - Backend 敏感凭证
+- 管理员密码(不写 localStorage / sessionStorage,不进 URL query,不进 console.log)
+- Session Cookie 内容(HttpOnly,由浏览器自动携带;前端不读 Cookie 判身份)
 - 聊天主数据副本
+
+本地只剩**可丢弃**数据:UI 配置、面具 / Prompt 资源、未发送草稿。清掉它们不影响任何权威数据,身份与聊天历史一律回服务端重取。
 
 不应重新开启:
 

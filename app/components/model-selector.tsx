@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import DownIcon from "../icons/down.svg";
-import GeminiIcon from "../icons/llm-icons/gemini.svg";
+import ModelIcon from "../icons/llm-icons/default.svg";
 import Locale from "../locales";
 import { useChatStore } from "../store";
 import { IconButton } from "./button";
@@ -30,7 +30,7 @@ export function ModelSelectorButton() {
   const preferred = session.preferredModelKey ?? null;
   const busy = !!session.pendingRequestId;
 
-  // FIX-07:生成中不调 loadModels,避免命中 PROVIDER_NOT_READY
+  // FIX-07:生成中不调 loadModels,避免命中 SERVICE_BUSY
   useEffect(() => {
     if (preferred && catalogStatus === "idle" && !busy) {
       void chatStore.loadModels();
@@ -140,7 +140,7 @@ export function ModelSelectorButton() {
                   handleSelection(item.value);
                 }}
               >
-                <GeminiIcon width={20} height={20} />
+                <ModelIcon width={20} height={20} />
                 <span className={styles["item-title"]}>{item.title}</span>
                 {item.value === currentValue ? (
                   <span className={styles["item-check"]} />

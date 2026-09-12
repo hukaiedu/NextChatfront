@@ -28,15 +28,12 @@ const cn = {
     SaasTips: "配置太麻烦，想要立即使用",
     TopTips:
       "🥳 NextChat AI 首发优惠，立刻解锁 OpenAI o1, GPT-4o, Claude-3.5 等最新大模型",
-    ServerTitle: "personChat",
-    PasswordPlaceholder: "请输入访问密码",
-    Submit: "登录",
-    Error: {
-      AUTH_INVALID_CREDENTIALS: "密码不正确，请重试",
-      AUTH_RATE_LIMITED: (seconds: number) =>
-        `失败次数过多，请 ${seconds} 秒后重试`,
-      NETWORK_ERROR: "网络异常，请稍后重试",
-    },
+  },
+  Bootstrap: {
+    Loading: "正在准备…",
+    Blocked: "当前登录状态已被禁用，请联系站点管理员",
+    Error: "暂时连不上服务，请稍后重试",
+    Retry: "重试",
   },
   ChatItem: {
     ChatItemCount: (count: number) => `${count} 条对话`,
@@ -716,6 +713,64 @@ const cn = {
     FetchFailed: "获取浏览器状态失败",
     Unsupported: "当前后端未提供浏览器状态接口，请升级 personChat Backend",
     Empty: "—",
+  },
+  AdminConsole: {
+    Title: "管理控制台",
+    LoginTitle: "管理员登录",
+    PasswordPlaceholder: "请输入管理员密码",
+    Submit: "登录",
+    SwitchWarning: "当前浏览器已有访客身份，登录管理员会切换为管理身份",
+    BackToChat: "返回聊天",
+    Error: {
+      AUTH_INVALID_CREDENTIALS: "密码不正确，请重试",
+      AUTH_RATE_LIMITED: (seconds: number) =>
+        `失败次数过多，请 ${seconds} 秒后重试`,
+      ADMIN_UNAVAILABLE: "该账号不具备管理员权限",
+      NETWORK_ERROR: "网络异常，请稍后重试",
+    },
+    Session: {
+      Title: "当前身份",
+      UserType: {
+        ANONYMOUS: "访客",
+        ADMIN: "管理员",
+        REGISTERED: "注册用户",
+      },
+      ExpiresAt: "登录状态有效期至",
+    },
+    Sessions: {
+      RevokeAll: "吊销全部登录状态",
+      RevokeAllTip: "会注销该账号在所有设备上的登录，需要重新登录",
+      RevokeAllConfirm: "确认吊销该账号的全部登录状态？此操作不可撤销。",
+      RevokeAllSuccess: (count: number) => `已吊销 ${count} 个登录状态`,
+      RevokeAllFailed: "吊销登录状态失败，请稍后重试",
+    },
+    Provider: {
+      Title: "Provider 运行状态",
+      SubTitle: "后端访问 Provider 所用页面的就绪程度",
+      State: {
+        STOPPED: "未启动",
+        STARTING: "启动中",
+        LOGIN_REQUIRED: "需要登录",
+        READY: "就绪",
+        BUSY: "执行中",
+        ERROR: "异常",
+      },
+      Unknown: "状态未知",
+      Actions: "Provider 操作",
+      ActionsTip:
+        "打开会启动并聚焦 Provider 页面；重启会关闭后按同一 Profile 重新启动",
+      Open: "打开 Provider",
+      OpenSuccess: "已打开 Provider 页面",
+      Restart: "重启 Provider",
+      RestartConfirm: "确认重启 Provider？会关闭当前页面，进行中的生成会失败。",
+      RestartSuccess: "Provider 已重启",
+    },
+    Logout: {
+      Title: "退出管理员登录",
+      Tip: "仅注销当前浏览器，不影响其他设备",
+      Confirm: "确认退出管理员登录？",
+      Failed: "退出登录失败，请稍后重试",
+    },
   },
   Store: {
     DefaultTopic: "新的聊天",

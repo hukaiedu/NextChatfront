@@ -48,8 +48,11 @@ import {
 
 const localStorage = safeLocalStorage();
 
-/** 后端只有 Gemini Web 一条通道,UI 不再选择模型 / Provider */
-export const BACKEND_MODEL_LABEL = "Gemini Web" as ModelType;
+/**
+ * Public 助手的中性展示名:不是真实模型,也不表达后端实现。
+ * 真实模型 label 只来自 GET /backend-api/provider/models 的 model.label。
+ */
+export const BACKEND_MODEL_LABEL = "Assistant" as ModelType;
 
 export type ChatMessageTool = {
   id: string;
@@ -157,46 +160,46 @@ export function getBotHello(): ChatMessage {
   }));
 }
 
-/** 后端错误码 → 中文提示;未列出的直接展示后端 message */
+/**
+ * 后端 Public 错误码 → 用户文案。
+ *
+ * 码集合与后端 src/common/errors/public-error.ts 的 Public 面严格对齐(§32-§37):
+ * 这里出现 PROVIDER_* / BROWSER_* 就说明 Public 契约漏了内部细节。
+ * 未列出的码一律回落到通用文案,绝不把原始码渲染给用户(§39/§40)。
+ */
 const ERROR_TEXT: Record<string, string> = {
+  CHAT_FAILED: "请求失败,请重试。",
+  SERVICE_BUSY: "服务暂时繁忙,请稍后重试。",
+  REQUEST_TIMEOUT: "请求超时,请重试。",
   CONVERSATION_NOT_FOUND: "会话不存在",
   CONVERSATION_DELETED: "会话已删除",
   CONVERSATION_ARCHIVED: "会话已归档,请先恢复后再发送",
   CONVERSATION_REQUEST_IN_PROGRESS: "这个会话还有回答在进行中,请先等它完成",
-  PROVIDER_LOGIN_REQUIRED: "Gemini 未登录,请在服务端浏览器里重新登录",
-  PROVIDER_BUSY: "浏览器正忙,稍后再试",
-  PROVIDER_NAVIGATION_FAILED: "连不上 Gemini,请稍后重试",
-  PROVIDER_RESPONSE_TIMEOUT: "Gemini 回答超时",
-  PROVIDER_CANCELLATION_UNCONFIRMED:
-    "无法确认 Gemini 已停止生成,浏览器正在重建",
-  PROVIDER_BROWSER_CRASHED: "浏览器崩溃,正在自动恢复",
-  PROVIDER_PAGE_CLOSED: "Gemini 页面被关闭,请重试",
-  PROVIDER_CONVERSATION_UNAVAILABLE: "Gemini 会话已失效,请新建会话",
-  SERVER_RESTARTED_DURING_PROCESSING: "服务重启导致回答中断,请重新发送",
-  SERVER_RESTARTED_DURING_CANCELLING: "服务重启时正在停止生成,请重新发送",
-  BROWSER_NOT_RUNNING: "服务端浏览器未运行,请在浏览器状态面板中重启",
-  BROWSER_LAUNCH_FAILED: "服务端浏览器启动失败,请查看后端日志",
-  BROWSER_RESTART_CONFLICT: "有回答正在生成,请先停止生成再重启浏览器",
-  BROWSER_RESTART_FAILED: "服务端浏览器重启失败,请查看后端日志",
-  BROWSER_RESTART_TIMEOUT: "服务端浏览器重启超时,请稍后刷新状态",
-  // I3:附件六码(R32);VALIDATION_ERROR 不属于六码,保持既有通用处理
+  REQUEST_NOT_FOUND: "这个回答已不存在",
+  REQUEST_NOT_CANCELLABLE: "这个回答已经结束,无需停止",
+  IDEMPOTENCY_KEY_REUSED: "这条消息已提交过,请重新发送",
+  VALIDATION_ERROR: "请求内容不符合要求,请检查后重试",
+  AUTH_REQUIRED: "登录状态已更新,请重试",
+  AUTH_FORBIDDEN: "没有权限执行该操作",
+  AUTH_CSRF_REJECTED: "请求已失效,请刷新页面后重试",
+  // I3:附件的请求侧限制(R32)
   PAYLOAD_TOO_LARGE: "图片请求数据过大,请减少图片或缩小后重试",
   ATTACHMENT_TOO_LARGE: "图片过大、数量过多或总大小超限",
   UNSUPPORTED_ATTACHMENT_TYPE: "仅支持 PNG/JPEG/WebP/GIF",
-  ATTACHMENT_CAPACITY_EXCEEDED: "服务端附件队列已满,请稍后重试",
-  PROVIDER_ATTACHMENT_FAILED: "Gemini 图片上传失败,请重试",
-  PROVIDER_ATTACHMENT_TIMEOUT: "Gemini 图片上传超时,请重试",
-  NETWORK_ERROR: "连不上后端服务",
+  NETWORK_ERROR: "网络异常,请稍后重试",
 };
 
+/** 未知码兜底:Public 面不该出现内部码,宁可给通用文案 */
+const GENERIC_ERROR_TEXT = ERROR_TEXT.CHAT_FAILED;
+
 export function errorTextForCode(code?: string | null): string {
-  if (!code) return "回答失败";
-  return ERROR_TEXT[code] ?? code;
+  if (!code) return GENERIC_ERROR_TEXT;
+  return ERROR_TEXT[code] ?? GENERIC_ERROR_TEXT;
 }
 
 export function backendErrorMessage(error: unknown): string {
   if (error instanceof BackendApiError) {
-    return ERROR_TEXT[error.code] ?? `${error.code}: ${error.message}`;
+    return ERROR_TEXT[error.code] ?? GENERIC_ERROR_TEXT;
   }
   if (error instanceof Error && ERROR_TEXT[error.name]) {
     return ERROR_TEXT[error.name];
@@ -540,6 +543,12 @@ interface ChatState {
 interface ChatActions {
   bootstrap(): Promise<void>;
   reloadList(): Promise<void>;
+  /**
+   * V1.3-C FIX-02:身份边界重置。当前身份失效或换成另一个身份时,丢掉本地全部
+   * 聊天态(Conversation / Message / Request 与 SSE 派生 UI),并让在途列表响应作废。
+   * 只清状态、不发请求 —— 拉新身份的数据由下一次 bootstrap 负责。
+   */
+  resetForIdentity(): void;
   /** PAG-1:加载下一页(追加型) */
   loadMoreConversations(): Promise<void>;
   switchListStatus(status: ConversationStatus): Promise<void>;
@@ -654,6 +663,17 @@ export const useChatStore = create<ChatStore>()((set, get) => {
     pendingLatestRefreshIds.clear();
     olderMessageRequestTokens.clear();
     exportMessageRequestTokens.clear();
+  }
+
+  /**
+   * 列表分页 ownership 作废(FIX-02):递增权威 epoch 让在途响应写不进 UI,并释放
+   * initialLoad 槽位 —— 否则新身份的首次 reloadList 会被当成「同 status 在途」
+   * 折叠成 trailing,根本不发请求。
+   */
+  function invalidateListOwnership(): void {
+    listGeneration += 1;
+    initialLoad = null;
+    pendingReloadStatus = null;
   }
 
   /** 按 id 改某条消息:订阅回调可能在会话切换 / 删除之后才到达 */
@@ -1142,6 +1162,14 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         console.warn("[Chat] 清理本地聊天数据失败", error);
       }
       await get().reloadList();
+    },
+
+    /** FIX-02:身份边界重置(只清不发)。关流 + 废弃分页 ownership + 回到初始态 */
+    resetForIdentity() {
+      closeAllStreams();
+      clearAllMessageRequestOwnership();
+      invalidateListOwnership();
+      set({ ...DEFAULT_CHAT_STATE });
     },
 
     /** 重新拉列表(权威):入口即权威失效 —— 立即递增 epoch 并废弃旧分页进度 */
@@ -1963,11 +1991,8 @@ export const useChatStore = create<ChatStore>()((set, get) => {
         set({ modelCatalog: catalog.models, modelCatalogStatus: "ready" });
       } catch (error) {
         console.error("[Chat] 模型目录加载失败", error);
-        // FIX-07:PROVIDER_NOT_READY(Scheduler 持锁)重置为 idle 允许重试,其他错误仍为 error
-        if (
-          error instanceof BackendApiError &&
-          error.code === "PROVIDER_NOT_READY"
-        ) {
+        // FIX-07:SERVICE_BUSY(暂时不可用)重置为 idle 允许稍后重试,其他错误仍为 error
+        if (error instanceof BackendApiError && error.code === "SERVICE_BUSY") {
           set({ modelCatalogStatus: "idle" });
         } else {
           set({ modelCatalogStatus: "error" });

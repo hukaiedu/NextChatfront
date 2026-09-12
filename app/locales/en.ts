@@ -29,15 +29,12 @@ const en: LocaleType = {
     SaasTips: "Too Complex, Use Immediately Now",
     TopTips:
       "🥳 NextChat AI launch promotion: Instantly unlock the latest models like OpenAI o1, GPT-4o, Claude-3.5!",
-    ServerTitle: "personChat",
-    PasswordPlaceholder: "Enter access password",
-    Submit: "Sign in",
-    Error: {
-      AUTH_INVALID_CREDENTIALS: "Incorrect password, please try again",
-      AUTH_RATE_LIMITED: (seconds: number) =>
-        `Too many failed attempts, retry in ${seconds}s`,
-      NETWORK_ERROR: "Network error, please try again later",
-    },
+  },
+  Bootstrap: {
+    Loading: "Getting things ready…",
+    Blocked: "This sign-in has been disabled, please contact the site admin",
+    Error: "Cannot reach the service right now, please try again",
+    Retry: "Retry",
   },
   ChatItem: {
     ChatItemCount: (count: number) => `${count} messages`,
@@ -728,6 +725,68 @@ const en: LocaleType = {
     Unsupported:
       "This backend version has no browser status API; please upgrade personChat Backend",
     Empty: "—",
+  },
+  AdminConsole: {
+    Title: "Admin console",
+    LoginTitle: "Admin sign-in",
+    PasswordPlaceholder: "Enter admin password",
+    Submit: "Sign in",
+    SwitchWarning:
+      "This browser already has a guest session; signing in switches this browser to the admin identity",
+    BackToChat: "Back to chat",
+    Error: {
+      AUTH_INVALID_CREDENTIALS: "Incorrect password, please try again",
+      AUTH_RATE_LIMITED: (seconds: number) =>
+        `Too many failed attempts, retry in ${seconds}s`,
+      ADMIN_UNAVAILABLE: "This account is not an administrator",
+      NETWORK_ERROR: "Network error, please try again later",
+    },
+    Session: {
+      Title: "Current identity",
+      UserType: {
+        ANONYMOUS: "Guest",
+        ADMIN: "Admin",
+        REGISTERED: "Registered user",
+      },
+      ExpiresAt: "Session expires at",
+    },
+    Sessions: {
+      RevokeAll: "Revoke all sessions",
+      RevokeAllTip:
+        "Signs this account out on every device; signing in again is required",
+      RevokeAllConfirm:
+        "Revoke every session of this account? This cannot be undone.",
+      RevokeAllSuccess: (count: number) => `${count} sessions revoked`,
+      RevokeAllFailed: "Failed to revoke sessions, please try again",
+    },
+    Provider: {
+      Title: "Provider status",
+      SubTitle: "How ready the provider page behind the backend is",
+      State: {
+        STOPPED: "Stopped",
+        STARTING: "Starting",
+        LOGIN_REQUIRED: "Sign-in required",
+        READY: "Ready",
+        BUSY: "Working",
+        ERROR: "Error",
+      },
+      Unknown: "Unknown",
+      Actions: "Provider actions",
+      ActionsTip:
+        "Open starts and focuses the provider page; Restart closes it and relaunches with the same profile",
+      Open: "Open provider",
+      OpenSuccess: "Provider page opened",
+      Restart: "Restart provider",
+      RestartConfirm:
+        "Restart the provider? The current page closes and in-flight generations fail.",
+      RestartSuccess: "Provider restarted",
+    },
+    Logout: {
+      Title: "Sign out of admin",
+      Tip: "Only signs out this browser; other devices are unaffected",
+      Confirm: "Sign out of admin?",
+      Failed: "Failed to sign out, please try again",
+    },
   },
   Store: {
     DefaultTopic: "New Conversation",

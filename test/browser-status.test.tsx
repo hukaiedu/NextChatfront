@@ -5,31 +5,33 @@ import {
   stopBrowserStatusPolling,
   useBrowserStore,
 } from "../app/store/browser";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import {
-  BrowserStatusButton,
-  BrowserStatusSection,
+  AdminBrowserPanel,
   browserErrorText,
   browserStateView,
   browserStatusRows,
   formatUptime,
 } from "../app/components/browser-status";
-import { errorTextForCode } from "../app/store/chat";
 import Locale from "../app/locales";
-import type { BackendBrowserStatus } from "../app/client/backend-api";
+import type { AdminBrowserStatus } from "../app/client/admin-api";
 
 /**
- * 浏览器状态面板验收:状态只来自后端 GET /browser/status,重启走
- * POST /browser/restart,多个展示位(设置页 + 聊天头部)共享一个轮询定时器。
+ * V1.3-C:浏览器运维面板的 Admin 面验收。
+ *
+ * 状态只来自 canonical GET /backend-api/admin/browser/status,重启走
+ * POST /backend-api/admin/browser/restart(§22);旧 /browser/* alias 已退役(§23)。
  * 套路与其它 backend-* 测试相同:不 mock API Client,从最外层伪造 HTTP。
  */
 
+const STATUS_URL = "/backend-api/admin/browser/status";
+const RESTART_URL = "/backend-api/admin/browser/restart";
 const STARTED_AT = "2026-09-06T06:20:00.000Z";
 const EMPTY = Locale.Browser.Empty;
 
 function status(
-  overrides: Partial<BackendBrowserStatus> = {},
-): BackendBrowserStatus {
+  overrides: Partial<AdminBrowserStatus> = {},
+): AdminBrowserStatus {
   return {
     state: "RUNNING",
     browserType: "chromium",
@@ -73,14 +75,14 @@ function fail(httpStatus: number, code: string, message: string) {
 }
 
 function route(url: string, method: string): any {
-  if (url === "/backend-api/browser/status" && method === "GET") {
+  if (url === STATUS_URL && method === "GET") {
     if (server.notImplemented) return reply(404);
     if (server.failStatus) {
       return fail(503, "BROWSER_NOT_RUNNING", "browser is not running");
     }
     return reply(200, { data: server.status });
   }
-  if (url === "/backend-api/browser/restart" && method === "POST") {
+  if (url === RESTART_URL && method === "POST") {
     if (server.notImplemented) return reply(404);
     if (server.failRestart) {
       return fail(409, server.failRestart, "restart rejected");
@@ -92,11 +94,11 @@ function route(url: string, method: string): any {
 }
 
 function statusCalls(): RecordedCall[] {
-  return calls.filter((c) => c.url === "/backend-api/browser/status");
+  return calls.filter((c) => c.url === STATUS_URL);
 }
 
 function restartCalls(): RecordedCall[] {
-  return calls.filter((c) => c.url === "/backend-api/browser/restart");
+  return calls.filter((c) => c.url === RESTART_URL);
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -125,7 +127,7 @@ afterEach(() => {
 });
 
 describe("浏览器状态拉取", () => {
-  test("B-01 refresh 拉取 GET /browser/status 并写入 store", async () => {
+  test("B-01 refresh 拉取 canonical GET /admin/browser/status 并写入 store", async () => {
     await useBrowserStore.getState().refresh();
 
     expect(statusCalls()).toHaveLength(1);
@@ -160,7 +162,7 @@ describe("浏览器状态拉取", () => {
   });
 
   test("B-04 后端字段缺失时逐行降级为占位符而不是整块报错", async () => {
-    server.status = { state: "STARTING" } as BackendBrowserStatus;
+    server.status = { state: "STARTING" } as AdminBrowserStatus;
     await useBrowserStore.getState().refresh();
 
     const rows = browserStatusRows(useBrowserStore.getState().status, null);
@@ -200,17 +202,18 @@ describe("浏览器状态拉取", () => {
     expect(browserErrorText("NETWORK_ERROR", 404)).toBe(
       Locale.Browser.Unsupported,
     );
+    // §36:Admin 面显示原始码,运维要能区分 Profile 占用与重启超时
     expect(browserErrorText("NETWORK_ERROR", null)).toBe(
-      `${Locale.Browser.FetchFailed} · ${errorTextForCode("NETWORK_ERROR")}`,
+      `${Locale.Browser.FetchFailed} · NETWORK_ERROR`,
     );
-    expect(browserErrorText("BROWSER_NOT_RUNNING", 503)).toContain(
-      errorTextForCode("BROWSER_NOT_RUNNING"),
+    expect(browserErrorText("BROWSER_NOT_RUNNING", 503)).toBe(
+      `${Locale.Browser.FetchFailed} · BROWSER_NOT_RUNNING`,
     );
   });
 });
 
 describe("浏览器重启", () => {
-  test("B-06 restart 走 POST /browser/restart 并以后端返回的快照为准", async () => {
+  test("B-06 restart 走 canonical POST /admin/browser/restart 并以后端返回快照为准", async () => {
     server.restartResult = status({ uptimeMs: 2000 });
     await useBrowserStore.getState().refresh();
 
@@ -223,13 +226,13 @@ describe("浏览器重启", () => {
     expect(useBrowserStore.getState().restarting).toBe(false);
   });
 
-  test("B-07 后端拒绝重启时返回中文错误并回读真实状态", async () => {
+  test("B-07 后端拒绝重启时返回原始码并回读真实状态", async () => {
     server.failRestart = "BROWSER_RESTART_CONFLICT";
     const result = await useBrowserStore.getState().restart();
     await tick();
 
     expect(result.ok).toBe(false);
-    expect(result.errorText).toBe(errorTextForCode("BROWSER_RESTART_CONFLICT"));
+    expect(result.errorText).toBe("BROWSER_RESTART_CONFLICT: restart rejected");
     // 失败后立刻回读一次:回读成功即清除错误码,面板回到真实状态
     expect(statusCalls()).toHaveLength(1);
     const state = useBrowserStore.getState();
@@ -245,7 +248,6 @@ describe("浏览器重启", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errorText).toBe(Locale.Browser.Unsupported);
-    expect(result.errorText).not.toBe(errorTextForCode("NETWORK_ERROR"));
     expect(statusCalls()).toHaveLength(1);
   });
 
@@ -257,12 +259,6 @@ describe("浏览器重启", () => {
     expect(restartCalls()).toHaveLength(1);
     expect(results[0].ok).toBe(true);
     expect(results[1].ok).toBe(false);
-  });
-
-  test("B-09 浏览器错误码有中文映射,未知错误码回退原文", () => {
-    expect(errorTextForCode("BROWSER_RESTART_CONFLICT")).toContain("重启");
-    expect(errorTextForCode("BROWSER_NOT_RUNNING")).toContain("浏览器");
-    expect(errorTextForCode("SOMETHING_NEW")).toBe("SOMETHING_NEW");
   });
 });
 
@@ -299,9 +295,9 @@ describe("轮询共享", () => {
   });
 });
 
-describe("展示位渲染", () => {
-  test("B-12 设置页面板展示状态、关键字段与重启入口", async () => {
-    render(<BrowserStatusSection />);
+describe("Admin 面板渲染", () => {
+  test("B-12 /admin 面板展示状态、运维字段与重启入口", async () => {
+    render(<AdminBrowserPanel />);
     await act(async () => {
       await tick();
     });
@@ -313,11 +309,12 @@ describe("展示位渲染", () => {
     expect(screen.getByText(Locale.Browser.LoggedIn.Yes)).toBeTruthy();
     // 行标题 + 按钮文案各一处
     expect(screen.getAllByText(Locale.Browser.Actions.Restart)).toHaveLength(2);
+    expect(statusCalls()[0].url).toBe(STATUS_URL);
   });
 
   test("B-12a 后端未实现接口时面板给出升级指引而非网络错误", async () => {
     server.notImplemented = true;
-    render(<BrowserStatusSection />);
+    render(<AdminBrowserPanel />);
     await act(async () => {
       await tick();
     });
@@ -325,21 +322,6 @@ describe("展示位渲染", () => {
     expect(screen.getByText(Locale.Browser.Unsupported)).toBeTruthy();
     // 字段级降级:面板照常渲染,缺数据的行给占位符而不是崩掉
     expect(screen.getAllByText(EMPTY).length).toBeGreaterThanOrEqual(6);
-  });
-
-  test("B-13 聊天头部胶囊展示状态标签,点击展开详情", async () => {
-    render(<BrowserStatusButton />);
-    await act(async () => {
-      await tick();
-    });
-
-    expect(screen.getByText(Locale.Browser.State.RUNNING)).toBeTruthy();
-    expect(screen.queryByText(Locale.Browser.Fields.StartedAt)).toBeNull();
-
-    fireEvent.click(screen.getByText(Locale.Browser.State.RUNNING));
-    expect(screen.getByText(Locale.Browser.Fields.StartedAt)).toBeTruthy();
-    expect(screen.getByText(Locale.Browser.Actions.Refresh)).toBeTruthy();
-    expect(screen.getByText(Locale.Browser.Hint.RUNNING)).toBeTruthy();
   });
 });
 

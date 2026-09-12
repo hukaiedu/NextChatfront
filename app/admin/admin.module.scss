@@ -1,0 +1,49 @@
+.console {
+  min-height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  background-color: var(--second);
+
+  .inner {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 24px 20px 40px;
+    box-sizing: border-box;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .title {
+    font-size: 20px;
+    font-weight: bold;
+  }
+
+  .sections {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .value {
+    max-width: 260px;
+    font-size: 12px;
+    text-align: right;
+    opacity: 0.75;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
