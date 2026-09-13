@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { jest } from "@jest/globals";
 import { createElement } from "react";
 
@@ -62,7 +64,10 @@ function fail(status: number, code: string, message: string) {
 type MockRoute = (url: string, method: string, body: any) => any;
 let route: MockRoute = () => fail(404, "NOT_FOUND", "未路由");
 
-function sessionData(authenticated: boolean, userType: string | null = "ANONYMOUS") {
+function sessionData(
+  authenticated: boolean,
+  userType: string | null = "ANONYMOUS",
+) {
   return authenticated
     ? { authenticated: true, expiresAt: STAMP, userType }
     : { authenticated: false, expiresAt: null };
@@ -183,7 +188,8 @@ describe("C-AUTH 匿名自动进入", () => {
     expect(callsTo(SESSION, "GET")).toHaveLength(2);
 
     // 服务恢复后由用户手动 Retry 回到 authenticated
-    route = (url) => (url === SESSION ? reply(200, { data: sessionData(true) }) : undefined);
+    route = (url) =>
+      url === SESSION ? reply(200, { data: sessionData(true) }) : undefined;
     act(() => useAuthStore.getState().retryBootstrap());
     await act(settle);
 
@@ -271,7 +277,11 @@ describe("C-AUTH 管理员登录判定", () => {
           return reply(200, { data: sessionData(true, "ANONYMOUS") });
         }
         if (body?.password === "limited") {
-          return fail(429, "AUTH_RATE_LIMITED", "Too many failed login attempts");
+          return fail(
+            429,
+            "AUTH_RATE_LIMITED",
+            "Too many failed login attempts",
+          );
         }
         return fail(401, "AUTH_INVALID_CREDENTIALS", "Invalid password");
       }
@@ -283,7 +293,9 @@ describe("C-AUTH 管理员登录判定", () => {
     expect(useAuthStore.getState().adminLoginError).toBeNull();
 
     expect(await useAuthStore.getState().adminLogin("compat")).toBe(false);
-    expect(useAuthStore.getState().adminLoginError?.code).toBe("ADMIN_UNAVAILABLE");
+    expect(useAuthStore.getState().adminLoginError?.code).toBe(
+      "ADMIN_UNAVAILABLE",
+    );
 
     expect(await useAuthStore.getState().adminLogin("bad")).toBe(false);
     expect(useAuthStore.getState().adminLoginError?.code).toBe(
@@ -302,10 +314,13 @@ describe("C-AUTH 管理员登录判定", () => {
 
 describe("C-AUTH 引导门渲染", () => {
   const gate = () =>
-    render(createElement(AuthGate, null, createElement("div", {}, "HOME-MARK")));
+    render(
+      createElement(AuthGate, null, createElement("div", {}, "HOME-MARK")),
+    );
 
   test("C-AUTH-UI-01 引导中显示占位、不渲染 children;成功后透传", async () => {
-    route = (url) => (url === SESSION ? reply(200, { data: sessionData(true) }) : undefined);
+    route = (url) =>
+      url === SESSION ? reply(200, { data: sessionData(true) }) : undefined;
 
     gate();
     expect(screen.getByText(Locale.Bootstrap.Loading)).toBeTruthy();
@@ -337,7 +352,8 @@ describe("C-AUTH 引导门渲染", () => {
     expect(screen.getByText(Locale.Bootstrap.Error)).toBeTruthy();
 
     // Retry 走手动重试路径:服务恢复后回到 authenticated
-    route = (url) => (url === SESSION ? reply(200, { data: sessionData(true) }) : undefined);
+    route = (url) =>
+      url === SESSION ? reply(200, { data: sessionData(true) }) : undefined;
     fireEvent.click(screen.getByText(Locale.Bootstrap.Retry));
     await act(settle);
     expect(screen.getByText("HOME-MARK")).toBeTruthy();
@@ -346,11 +362,20 @@ describe("C-AUTH 引导门渲染", () => {
 
 describe("登出语义与身份真相(迁移自 SEC-1 FE-AUTH-09/10)", () => {
   function noReply(status: number) {
-    return { ok: status >= 200 && status < 300, status, headers: { get: () => null }, json: async () => null };
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: () => null },
+      json: async () => null,
+    };
   }
 
   test("FE-AUTH-09A logout 204 → 关全部流并清空本地身份,但不 cancelRequest", async () => {
-    useAuthStore.setState({ status: "authenticated", userType: "ANONYMOUS", expiresAt: STAMP });
+    useAuthStore.setState({
+      status: "authenticated",
+      userType: "ANONYMOUS",
+      expiresAt: STAMP,
+    });
     route = (url, method) =>
       url === LOGOUT && method === "POST" ? noReply(204) : undefined;
     const closed: string[] = [];
@@ -367,13 +392,20 @@ describe("登出语义与身份真相(迁移自 SEC-1 FE-AUTH-09/10)", () => {
     expect(state.expiresAt).toBeNull();
     expect(state.logoutError).toBeNull();
     expect(
-      calls.some((c) => c.url.includes("/requests/") && c.url.includes("/cancel")),
+      calls.some(
+        (c) => c.url.includes("/requests/") && c.url.includes("/cancel"),
+      ),
     ).toBe(false);
   });
 
   test("FE-AUTH-09B/09C logout 网络失败或 5xx → 保持 authenticated,流不动", async () => {
     const cases: Array<[() => any, string]> = [
-      [() => { throw new TypeError("network down"); }, "NETWORK_ERROR"],
+      [
+        () => {
+          throw new TypeError("network down");
+        },
+        "NETWORK_ERROR",
+      ],
       [() => fail(500, "INTERNAL_ERROR", "boom"), "INTERNAL_ERROR"],
     ];
 
@@ -460,7 +492,8 @@ describe("SSE 断线重连探测", () => {
     FakeEventSource.instances = [];
     (globalThis as any).EventSource = FakeEventSource;
     useAuthStore.setState({ status: "authenticated", expiresAt: STAMP });
-    route = (url) => (url === SESSION ? reply(200, { data: sessionData(true) }) : undefined);
+    route = (url) =>
+      url === SESSION ? reply(200, { data: sessionData(true) }) : undefined;
 
     useChatStore.getState().followRequest("c-1", "req-1", "m-1");
     useChatStore.getState().followRequest("c-2", "req-2", "m-2");
@@ -481,5 +514,151 @@ describe("SSE 断线重连探测", () => {
     expect(useAuthStore.getState().status).toBe("authenticated");
     closeAllStreams();
     expect(activeStreamCount()).toBe(0);
+  });
+
+  /**
+   * §8 AUTH-PROBE-01:探测到 authenticated=false 是「身份确实没了」的证据(不是网络抖动),
+   * 必须停掉旧流并进入 stale → bootstrap;恢复链里绝不重放原业务 mutation。
+   */
+  test("AUTH-PROBE-01 probe 返回 authenticated=false → 关旧流走 bootstrap,且不重放业务 mutation", async () => {
+    FakeEventSource.instances = [];
+    (globalThis as any).EventSource = FakeEventSource;
+    useAuthStore.setState({
+      status: "authenticated",
+      userType: "ANONYMOUS",
+      expiresAt: STAMP,
+    });
+    const epochBefore = useAuthStore.getState().identityEpoch;
+    route = (url, method) => {
+      if (url === SESSION) return reply(200, { data: sessionData(false) });
+      if (url === ANONYMOUS && method === "POST") {
+        return reply(200, { data: sessionData(true) });
+      }
+      return undefined;
+    };
+
+    useChatStore.getState().followRequest("c-1", "req-1", "m-1");
+    const [first] = FakeEventSource.instances;
+    calls.length = 0;
+
+    first.readyState = FakeEventSource.CLOSED;
+    first.emit("error");
+    await settle();
+
+    // 两次 GET:① transport error 后的共享探测(给出 false) ② bootstrap 自己的探测
+    expect(callsTo(SESSION, "GET")).toHaveLength(2);
+    expect(callsTo(ANONYMOUS, "POST")).toHaveLength(1);
+    const state = useAuthStore.getState();
+    expect(state.status).toBe("authenticated");
+    // 旧身份的流被关掉,身份边界确实推进过(→ AuthGate 会 resetForIdentity)
+    expect(first.closed).toBe(true);
+    expect(state.identityEpoch).toBe(epochBefore + 1);
+    expect(activeStreamCount()).toBe(0);
+    // 红线:整条恢复链没有重发任何业务 mutation
+    expect(
+      calls.filter((c) => c.method === "POST" && c.url.endsWith("/messages")),
+    ).toEqual([]);
+
+    // 旧请求不会被「自愈重连」复活:等过一个退避周期后仍只有那一条流
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(callsTo(SESSION, "GET")).toHaveLength(2);
+  });
+
+  /**
+   * §8 AUTH-PROBE-02:probe 自己失败(5xx / 网络)属于「未知」,既不是失效也不是登录,
+   * 因此只能保持现状按既有退避重连 —— 不许建新的匿名身份、不许清 UI、不许把探测变成循环。
+   */
+  test("AUTH-PROBE-02 probe 5xx / 网络失败:保持 authenticated 且不新建匿名身份、不清 UI、不无限探测", async () => {
+    FakeEventSource.instances = [];
+    (globalThis as any).EventSource = FakeEventSource;
+    useAuthStore.setState({
+      status: "authenticated",
+      userType: "ANONYMOUS",
+      expiresAt: STAMP,
+    });
+    const epochBefore = useAuthStore.getState().identityEpoch;
+    let probeFailure: "http5xx" | "network" = "http5xx";
+    route = (url) => {
+      if (url !== SESSION) return undefined;
+      if (probeFailure === "http5xx") {
+        return fail(500, "INTERNAL_ERROR", "session probe failed");
+      }
+      throw new TypeError("Failed to fetch");
+    };
+
+    useChatStore.getState().followRequest("c-1", "req-1", "m-1");
+    const [first] = FakeEventSource.instances;
+    calls.length = 0;
+
+    // ① 5xx:一次探测,状态与身份原样保留
+    first.readyState = FakeEventSource.CLOSED;
+    first.emit("error");
+    await settle();
+    expect(callsTo(SESSION, "GET")).toHaveLength(1);
+    expect(useAuthStore.getState().status).toBe("authenticated");
+    expect(useAuthStore.getState().expiresAt).toBe(STAMP);
+    expect(callsTo(ANONYMOUS, "POST")).toHaveLength(0);
+
+    // 探测未知 → 沿用既有指数退避重连(第一条流被换掉)
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const second =
+      FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    expect(second).not.toBe(first);
+    expect(first.closed).toBe(true);
+
+    // ② 网络异常:同样是「未知」,不改动认证状态
+    probeFailure = "network";
+    second.readyState = FakeEventSource.CLOSED;
+    second.emit("error");
+    await settle();
+    expect(callsTo(SESSION, "GET")).toHaveLength(2);
+    expect(useAuthStore.getState().status).toBe("authenticated");
+    expect(useAuthStore.getState().identityEpoch).toBe(epochBefore);
+    expect(callsTo(ANONYMOUS, "POST")).toHaveLength(0);
+    expect(activeStreamCount()).toBe(1);
+
+    // ③ 静置:没有新的 transport error 就不会有新的探测(线性,而非自激循环)
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    expect(callsTo(SESSION, "GET")).toHaveLength(2);
+    closeAllStreams();
+    expect(activeStreamCount()).toBe(0);
+  });
+});
+
+/**
+ * §9 Store 分层静态守卫:`active-streams` 抽出后,旧「auth 不依赖 chat」的
+ * TDZ 判据换成「auth 不得 import chat store / store 桶文件」这条仍然真实的边界。
+ * 双向锁定 —— 真实源码必须干净,同时守卫本身必须抓得住违规样本。
+ */
+const FORBIDDEN_AUTH_IMPORTS = ["./chat", "../chat", "./store", "../store"];
+
+/** 抽出源码里所有静态 import 的模块说明符,返回其中越界的那部分 */
+function forbiddenAuthImports(specifiers: string[]): string[] {
+  return specifiers.filter(
+    (specifier) =>
+      FORBIDDEN_AUTH_IMPORTS.includes(specifier) ||
+      /(^|\/)(store\/)?chat$/.test(specifier),
+  );
+}
+
+describe("Store 分层静态守卫", () => {
+  test("AUTH-GUARD-01 store/auth 不得 import chat store(允许 active-streams)", () => {
+    const source = readFileSync("app/store/auth.ts", "utf8");
+    const specifiers = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map(
+      (match) => match[1],
+    );
+    expect(forbiddenAuthImports(specifiers)).toEqual([]);
+    // 关流能力确实来自轻量注册表,而不是绕道 chat
+    expect(specifiers).toContain("./active-streams");
+  });
+
+  test("AUTH-GUARD-02 守卫本身有效:三种越界写法都被抓出,合规写法不误报", () => {
+    expect(forbiddenAuthImports(["../store/chat"])).toEqual(["../store/chat"]);
+    expect(forbiddenAuthImports(["./chat"])).toEqual(["./chat"]);
+    expect(forbiddenAuthImports(["../store"])).toEqual(["../store"]);
+    expect(
+      forbiddenAuthImports(["./active-streams", "../client/backend-api"]),
+    ).toEqual([]);
   });
 });
