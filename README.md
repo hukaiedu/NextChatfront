@@ -158,6 +158,18 @@ BACKEND_ORIGIN/api/*
 
 未设置 `BACKEND_ORIGIN` 时默认为 `http://127.0.0.1:3010`。该变量只在启动时读取一次,修改后需重启 dev server / 重新构建。
 
+## V1.4 身份与账号体验
+
+身份只有 `ANONYMOUS`、`REGISTERED`、`ADMIN`。普通用户使用 username/password：
+
+- `/` 为 anonymous-first；普通用户入口是 `/login`、`/register`，管理员入口独立为 `/admin/login`，控制台为 `/admin`。
+- 注册调用 `POST /backend-api/auth/register`，保留当前 `User.id`、chat 与 messages，UI 不因身份变更而清空。
+- 已有账号登录调用 `POST /backend-api/auth/user/login`；会关闭已有 streams、清除旧 conversation UI 与未发送敏感 draft，再加载目标账号数据，不迁移当前匿名聊天。
+- 改密调用 `POST /backend-api/auth/password/change`，保持同一 subject；`POST /backend-api/auth/sessions/revoke-all` 撤销该用户全部 Session。
+- logout、revoke-all、identity lost 是真正的 subject transition；多 Tab 在 focus/visibility 时重新 probe，mutation 不自动 replay。
+
+前端不实现 email、OAuth、2FA、password recovery 或 account deletion。Session 由 Backend 以随机 opaque token 管理，数据库只保存 token 的 SHA-256 hash；前端不读取 Cookie。
+
 ## 启动开发环境
 
 ```bash
@@ -413,8 +425,8 @@ Backend:
 ## 已知限制
 
 - **Backend 依赖**:没有 personChat Backend,前端无法聊天。
-- **多用户现状**:V1.3 起有「匿名访客 + ADMIN」双身份(Backend DB Session),但**没有**邮箱 / OAuth 注册与账号自助体系。
-- **发布闸门**:**NOT READY FOR PUBLIC INTERNET RELEASE** —— 仍缺 P6 Rate Limit / Quota、Scheduler 公平性、Browser Pool 与多 Gemini Account;`AUTH_ENABLED=false` 时后端只允许 loopback 监听。
+- **共享 Provider 账号**:V1.4 已有 REGISTERED 用户与 User.id ownership/quota 隔离,但所有用户共享 Backend、Browser Profile 与 Google/Gemini 登录态;Browser Pool 与多 Gemini Account 不在本版本。
+- **发布闸门**:**READY FOR PRODUCTION RELEASE REVIEW, NOT DEPLOYED** —— 发布前仍需 backup、真实 DB 指纹复核、`prisma migrate deploy`、production env/Nginx 核验、计划中的真实 Gemini smoke 与 post-deploy auth/browser smoke。
 - **Gemini 人工登录**:Gemini 登录态由 Backend Browser Profile 提供,前端无法处理登录。
 - **Gemini DOM 依赖**:Gemini Web 页面改版会影响 Backend 自动化。
 - **单实例**:Backend 当前为单实例架构。
