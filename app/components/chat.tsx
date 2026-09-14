@@ -63,6 +63,7 @@ import {
 import dynamic from "next/dynamic";
 
 import { Prompt, usePromptStore } from "../store/prompt";
+import { useAuthStore } from "../store/auth";
 import Locale from "../locales";
 
 import { IconButton } from "./button";
@@ -1020,6 +1021,22 @@ function _Chat(props: { attachment: AttachmentController }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * V1.4 U4 §51/§52:换主体时必须连本地草稿一起清掉。
+   *
+   * resetForIdentity() 清的是 store 的 lastInput,而这个输入框真正的值是组件本地的
+   * userInput —— 401 掉身份、旁观 Tab 被顶号这类「同一个文档里换身份」不会卸载组件,
+   * 于是上一身份没发出去的文本会留在框里。只盯 identityEpoch:它仅在真正换主体时自增,
+   * 所以注册的原地升级(同一 userId)不会误清(§52 / INPUT-ID-04)。
+   */
+  const identityEpoch = useAuthStore((state) => state.identityEpoch);
+  const seenIdentityEpoch = useRef(identityEpoch);
+  useEffect(() => {
+    if (seenIdentityEpoch.current === identityEpoch) return;
+    seenIdentityEpoch.current = identityEpoch;
+    setUserInput("");
+  }, [identityEpoch]);
 
   // 快捷键 shortcut keys
   const [showShortcutKeyModal, setShowShortcutKeyModal] = useState(false);

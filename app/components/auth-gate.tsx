@@ -73,6 +73,20 @@ export function AuthGate(props: { children?: ReactNode }) {
       (previous.userType !== userType || previous.epoch !== identityEpoch);
     if (!lost && !swapped) return;
 
+    /**
+     * §47:唯一的例外是「本 Tab 自己刚刚注册成功」—— User.id 没变,聊天还是那一屏数据,
+     * 重置反而把用户正在看的会话抹掉。标记必须在这里一次性消费掉(§18),
+     * 于是旁观 Tab 的 ANONYMOUS→REGISTERED(§48)、登录他人、被顶号仍走下面的重置。
+     */
+    const flagged = useAuthStore.getState().consumeSameSubjectTransition();
+    if (
+      flagged &&
+      previous.userType === "ANONYMOUS" &&
+      userType === "REGISTERED"
+    ) {
+      return;
+    }
+
     useChatStore.getState().resetForIdentity();
     // lost 时 children 已卸载,回来的那次挂载由 useLoadData 拉 —— 不在此处重复请求
     if (swapped) void useChatStore.getState().bootstrap();

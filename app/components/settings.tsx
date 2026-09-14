@@ -22,6 +22,7 @@ import {
 } from "./ui-lib";
 
 import { IconButton } from "./button";
+import { AccountSection } from "./account";
 import {
   SubmitKey,
   useChatStore,
@@ -315,6 +316,8 @@ export function Settings() {
         </div>
       </div>
       <div className={styles["settings"]}>
+        {/* V1.4 U4 §37/§39:账号区用现成的次级面板,不重构侧边栏 */}
+        <AccountSection />
         <List>
           <ListItem title={Locale.Settings.Avatar}>
             <Popover

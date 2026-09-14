@@ -35,6 +35,67 @@ const cn = {
     Error: "暂时连不上服务，请稍后重试",
     Retry: "重试",
   },
+  Account: {
+    Title: "账号",
+    Visitor: "当前身份：访客",
+    Admin: "当前为管理员身份",
+    AdminConsole: "进入管理控制台",
+    Login: "登录",
+    Register: "注册",
+    Logout: "退出",
+    ChangePassword: "修改密码",
+    RevokeAllDevices: "退出所有设备",
+    RevokeAllConfirm:
+      "确认退出所有设备？该账号在所有浏览器上的登录状态都会失效，聊天记录不会丢失。",
+    RevokeAllHint: "注销该账号在所有浏览器上的登录，聊天记录不受影响",
+    PasswordChanged: "密码已更新，其它设备已退出。",
+    LoginTitle: "登录已有账号",
+    RegisterTitle: "注册新账号",
+    Username: "用户名",
+    UsernamePlaceholder: "字母、数字、下划线或短横线，3–32 位",
+    Password: "密码",
+    NewPassword: "新密码",
+    CurrentPassword: "当前密码",
+    ConfirmPassword: "确认密码",
+    SubmitLogin: "登录",
+    SubmitRegister: "注册",
+    SubmitChange: "确认修改",
+    Submitting: "提交中…",
+    BackToChat: "返回聊天",
+    ToLogin: "已有账号？去登录",
+    ToRegister: "还没有账号？去注册",
+    LoginOther: "登录其他账号",
+    /** §24：登录是换主体，匿名聊天不会被合并 */
+    LoginSwitchTip:
+      "登录已有账号后，将切换到该账号的聊天记录。当前匿名聊天不会自动合并到该账号。",
+    CurrentAccount: (name: string) => `当前已登录为 @${name}`,
+    SwitchAccountWarning: "继续登录将切换账号。",
+    AlreadyRegistered: (name: string) => `当前已注册为 @${name}`,
+    /** §35：注册是原地升级，聊天记录跟着同一个账号走 */
+    RegisterPreserveTip: "注册后当前聊天记录会保留并归属于你的新账号。",
+    /** §36：V1.4 没有找回密码能力，只提示风险，不放入口 */
+    NoRecoveryTip: "当前版本不支持找回密码，请妥善保管密码。",
+    UsernameInvalid: "用户名只能是字母、数字、下划线或短横线，长度 3–32 位。",
+    PasswordTooShort: "密码至少 8 位。",
+    PasswordMismatch: "两次输入的密码不一致。",
+    Error: {
+      /** §55：刻意用弱表达，不暴露「已被注册」这种可枚举信息 */
+      AUTH_USERNAME_ALREADY_TAKEN: "该用户名不可用",
+      AUTH_IDENTITY_NOT_ANONYMOUS: "当前身份无法注册，请返回聊天后重试",
+      AUTH_USER_DISABLED: "该账号已被停用，请联系站点管理员",
+      /** §56：用户名不存在 / 密码错 / 已停用，全收成同一句 */
+      AUTH_INVALID_CREDENTIALS: "用户名或密码错误",
+      AUTH_REQUIRED: "登录状态已失效，请重新登录",
+      AUTH_FORBIDDEN: "当前站点未开放账号功能",
+      AUTH_RATE_LIMITED: (seconds: number) =>
+        `请求过于频繁，请 ${seconds} 秒后重试`,
+      /** §58：503 绝不能被渲染成「密码错误」 */
+      SERVICE_BUSY: "服务暂时繁忙，请稍后重试",
+      VALIDATION_ERROR: "提交的内容不符合要求，请检查后重试",
+      NETWORK_ERROR: "网络异常，请稍后重试",
+      GENERIC: "操作未完成，请稍后重试",
+    },
+  },
   ChatItem: {
     ChatItemCount: (count: number) => `${count} 条对话`,
   },

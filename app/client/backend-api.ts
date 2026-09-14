@@ -367,11 +367,26 @@ export interface AuthSessionInfo {
   userType?: BackendUserType | null;
   /** Session 过期时间(ISO);未认证或 disabled 模式为 null */
   expiresAt: string | null;
+  /**
+   * V1.4 U4 §6:注册用户的展示登录名(后端 authenticated 面第四键)。
+   * §7 双版本兼容:旧后端不返回该键,经 normalizeAuthSession 归一后恒为 string | null。
+   */
+  username?: string | null;
+}
+
+/**
+ * V1.4 U4 §7:把后端 session 负载收敛成前端唯一形状 —— 缺 username 的旧响应归一成
+ * null,而不是让 undefined 泄漏进 store 去制造分支崩溃。
+ */
+function normalizeAuthSession(session: AuthSessionInfo): AuthSessionInfo {
+  return { ...session, username: session.username ?? null };
 }
 
 /** GET /api/auth/session:永不 401,启动探测与 SSE 重连探测共用 */
 export function getAuthSession(): Promise<AuthSessionInfo> {
-  return callBackend<AuthSessionInfo>("/auth/session");
+  return callBackend<AuthSessionInfo>("/auth/session").then(
+    normalizeAuthSession,
+  );
 }
 
 /**
@@ -379,14 +394,74 @@ export function getAuthSession(): Promise<AuthSessionInfo> {
  * 幂等:Cookie 已有效时直接返回既有身份。DISABLED Cookie → 401 AUTH_REQUIRED(不新建 User)。
  */
 export function bootstrapAnonymous(): Promise<AuthSessionInfo> {
-  return callBackend<AuthSessionInfo>("/auth/anonymous", { method: "POST" });
+  return callBackend<AuthSessionInfo>("/auth/anonymous", {
+    method: "POST",
+  }).then(normalizeAuthSession);
 }
 
-/** POST /api/auth/login:密码错 → 401,限流 → 429(信封 code + retryAfterSeconds) */
+/**
+ * POST /api/auth/login:**ADMIN 专用**密码登录。
+ * V1.4 U2 冻结后普通注册用户走 userLogin,这个端点永远不接受 username。
+ * 密码错 → 401,限流 → 429(信封 code + retryAfterSeconds)。
+ */
 export function login(password: string): Promise<AuthSessionInfo> {
   return callBackend<AuthSessionInfo>("/auth/login", {
     method: "POST",
     body: { password },
+  }).then(normalizeAuthSession);
+}
+
+/**
+ * POST /api/auth/register(U4 §9):把**当前匿名身份**原地升级为 REGISTERED。
+ * body 只有 username + password;确认密码只活在页面前端,永不发给后端。
+ * 409 AUTH_USERNAME_ALREADY_TAKEN / 409 AUTH_IDENTITY_NOT_ANONYMOUS /
+ * 429 AUTH_RATE_LIMITED / 503 SERVICE_BUSY。
+ */
+export function registerUser(
+  username: string,
+  password: string,
+): Promise<AuthSessionInfo> {
+  return callBackend<AuthSessionInfo>("/auth/register", {
+    method: "POST",
+    body: { username, password },
+  }).then(normalizeAuthSession);
+}
+
+/**
+ * POST /api/auth/user/login(U4 §10):Registered 账号登录,与 Admin 的
+ * POST /auth/login 是两条永不相交的路径。口令错恒 401 AUTH_INVALID_CREDENTIALS。
+ */
+export function userLogin(
+  username: string,
+  password: string,
+): Promise<AuthSessionInfo> {
+  return callBackend<AuthSessionInfo>("/auth/user/login", {
+    method: "POST",
+    body: { username, password },
+  }).then(normalizeAuthSession);
+}
+
+/**
+ * POST /api/auth/password/change(U4 §11):成功后后端已轮换当前 Session、
+ * 撤销该账号其它所有 Session,响应就是**新的**当前身份负载。
+ */
+export function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<AuthSessionInfo> {
+  return callBackend<AuthSessionInfo>("/auth/password/change", {
+    method: "POST",
+    body: { currentPassword, newPassword },
+  }).then(normalizeAuthSession);
+}
+
+/**
+ * POST /api/auth/sessions/revoke-all(U4 §12):撤销**自己**的全部 Session,
+ * 含当前这一条;envelope 由 callBackend 统一解包,这里只拿 data.revoked。
+ */
+export function revokeAllSessions(): Promise<{ revoked: number }> {
+  return callBackend<{ revoked: number }>("/auth/sessions/revoke-all", {
+    method: "POST",
   });
 }
 

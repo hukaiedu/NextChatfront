@@ -36,6 +36,71 @@ const en: LocaleType = {
     Error: "Cannot reach the service right now, please try again",
     Retry: "Retry",
   },
+  Account: {
+    Title: "Account",
+    Visitor: "Current identity: Guest",
+    Admin: "You are signed in as an administrator",
+    AdminConsole: "Open admin console",
+    Login: "Sign in",
+    Register: "Create account",
+    Logout: "Sign out",
+    ChangePassword: "Change password",
+    RevokeAllDevices: "Sign out of all devices",
+    RevokeAllConfirm:
+      "Sign out of all devices? Every session of this account will end, your chats are kept.",
+    RevokeAllHint:
+      "Ends every session of this account; your chats are not affected",
+    PasswordChanged: "Password updated. Other devices were signed out.",
+    LoginTitle: "Sign in to your account",
+    RegisterTitle: "Create an account",
+    Username: "Username",
+    UsernamePlaceholder: "Letters, digits, _ or -, 3–32 characters",
+    Password: "Password",
+    NewPassword: "New password",
+    CurrentPassword: "Current password",
+    ConfirmPassword: "Confirm password",
+    SubmitLogin: "Sign in",
+    SubmitRegister: "Create account",
+    SubmitChange: "Save password",
+    Submitting: "Submitting…",
+    BackToChat: "Back to chat",
+    ToLogin: "Already have an account? Sign in",
+    ToRegister: "No account yet? Create one",
+    LoginOther: "Sign in to another account",
+    /** §24：logging in switches subject; anonymous chats are never merged */
+    LoginSwitchTip:
+      "Signing in switches to that account's chats. Your current anonymous chats are not merged into it.",
+    CurrentAccount: (name: string) => `Signed in as @${name}`,
+    SwitchAccountWarning: "Continuing will switch accounts.",
+    AlreadyRegistered: (name: string) => `Already registered as @${name}`,
+    /** §35：registration upgrades the same subject in place */
+    RegisterPreserveTip:
+      "After registering, your current chats stay here and belong to your new account.",
+    /** §36：no password recovery in V1.4 */
+    NoRecoveryTip: "Password recovery is not available yet. Keep it safe.",
+    UsernameInvalid:
+      "Use 3–32 letters, digits, underscores or hyphens for the username.",
+    PasswordTooShort: "Password must be at least 8 characters.",
+    PasswordMismatch: "The two passwords do not match.",
+    Error: {
+      /** §55：deliberately weak wording, never "already taken" */
+      AUTH_USERNAME_ALREADY_TAKEN: "This username is not available",
+      AUTH_IDENTITY_NOT_ANONYMOUS:
+        "This identity cannot be registered, go back to chat and retry",
+      AUTH_USER_DISABLED: "This account is disabled, contact the site admin",
+      /** §56：unknown username, wrong password and disabled all collapse here */
+      AUTH_INVALID_CREDENTIALS: "Incorrect username or password",
+      AUTH_REQUIRED: "Your session has changed, please sign in again",
+      AUTH_FORBIDDEN: "Accounts are not enabled on this site",
+      AUTH_RATE_LIMITED: (seconds: number) =>
+        `Too many attempts, try again in ${seconds} seconds`,
+      /** §58：503 must never read as "wrong password" */
+      SERVICE_BUSY: "The service is busy right now, please try again later",
+      VALIDATION_ERROR: "Something in the form is not accepted",
+      NETWORK_ERROR: "Network problem, please try again later",
+      GENERIC: "Could not complete this action, please try again",
+    },
+  },
   ChatItem: {
     ChatItemCount: (count: number) => `${count} messages`,
   },

@@ -5,10 +5,14 @@ import {
   BackendApiError,
   BackendUserType,
   bootstrapAnonymous,
+  changePassword as apiChangePassword,
   getAuthSession,
   login as apiLogin,
   logout as apiLogout,
+  registerUser as apiRegisterUser,
+  revokeAllSessions as apiRevokeAllSessions,
   setUnauthorizedHandler,
+  userLogin as apiUserLogin,
 } from "../client/backend-api";
 import { closeAllStreams } from "./active-streams";
 
@@ -41,10 +45,36 @@ export interface LoginError {
   retryAfterSeconds?: number;
 }
 
+/**
+ * V1.4 U4 §54/§61/§85:注册 / 登录 / 改密 / 全设备退出的统一结果。
+ * 错误只作为返回值交给页面的临时 state,不进 store —— 表单报错既不该跨身份留存,
+ * 也不该在换文档后还能被读到。
+ */
+export type AuthAttemptResult =
+  | { ok: true; session?: AuthSessionInfo }
+  | { ok: false; error: LoginError };
+
+function toLoginError(error: unknown): LoginError {
+  return error instanceof BackendApiError
+    ? { code: error.code, retryAfterSeconds: error.retryAfterSeconds }
+    : { code: "NETWORK_ERROR" };
+}
+
 interface AuthState {
   status: AuthStatus;
   userType: AuthUserType | null;
   expiresAt: string | null;
+  /**
+   * V1.4 U4 §13/§68:REGISTERED 的展示登录名;ANONYMOUS / ADMIN / 未认证一律 null,
+   * 换身份与清身份时都会归零,绝不让上一个账号的名字留在界面上。
+   */
+  username: string | null;
+  /**
+   * V1.4 U4 §16/§18:「本 Tab 自己刚刚注册成功」的一次性标记。
+   * 只在 registerUser 成功时置 true,AuthGate 观测到身份变化时消费一次即归 false;
+   * 不写 localStorage / sessionStorage / Cookie,换文档自然消失。
+   */
+  sameSubjectTransition: boolean;
   /**
    * FIX-02 身份实例代数:本地原以为有效的身份其实已经没了就 +1(主动清除,或探测
    * 回来说没有)。两个身份可以 userType 完全相同(旧匿名 Session 被吊销 → 新匿名),
@@ -73,6 +103,42 @@ interface AuthActions {
    * 若身份已失效则重新 bootstrap,不重放任何业务请求(§14)。
    */
   refreshIdentity(): void;
+  /**
+   * U4 §17:可等待版的同一件事。注册 / 改密后要先确认后端的权威身份再动 UI,
+   * 所以需要一个能 await 的探测口,而不是 fire-and-forget 的 refreshIdentity。
+   */
+  probeIdentity(): Promise<void>;
+  /**
+   * U4 §16/§17:把当前匿名身份原地注册为 REGISTERED。
+   * 成功 → 先置一次性 sameSubjectTransition,再由 probeIdentity 落成 REGISTERED 身份,
+   * 于是当前文档里的 AuthGate 会看到 ANONYMOUS → REGISTERED 但不重置聊天视图。
+   * 任何失败都不得置标记、不得清 chat、不得动 identityEpoch(§19)。
+   */
+  registerUser(username: string, password: string): Promise<AuthAttemptResult>;
+  /**
+   * U4 §10/§20:Registered 账号登录 = **换主体**。
+   * 这里只负责拿 Cookie;清身份 / 清聊天 / 整页换文档由调用方编排
+   * (store 不得依赖 chat store,见 AUTH-GUARD-01)。
+   */
+  userLogin(username: string, password: string): Promise<AuthAttemptResult>;
+  /**
+   * U4 §11/§42:改密成功 = 后端已轮换当前 Session、撤销其它设备。
+   * userId 没变 ⇒ 只更新身份负载,绝不 resetForIdentity、绝不 epoch++。
+   */
+  changePassword(
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<AuthAttemptResult>;
+  /**
+   * U4 §12/§43:撤销自己的全部 Session(含当前)。成功后按 §42 纪律
+   * 清本地身份但**不**自动 bootstrap,新的匿名身份留给回首页时再建。
+   */
+  revokeAllSessions(): Promise<AuthAttemptResult>;
+  /**
+   * U4 §18:读一次即清零。只有 AuthGate 亲眼看到身份变化时才调用,
+   * 保证「刚注册」这个信息不会被下一个真正的换主体复用。
+   */
+  consumeSameSubjectTransition(): boolean;
   /**
    * 管理员登录(§19):只有「authenticated === true 且 userType === ADMIN」才算成功;
    * COMPAT 模式下 200 + ANONYMOUS 必须判为 Admin unavailable。
@@ -124,6 +190,7 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
         set({
           status: "authenticated",
           userType: session.userType ?? null,
+          username: session.username ?? null,
           expiresAt: session.expiresAt,
           bootstrapErrorCode: null,
         });
@@ -137,7 +204,10 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
       set({
         status: "authenticated",
         userType: created.userType ?? null,
+        username: created.username ?? null,
         expiresAt: created.expiresAt,
+        // 能走到这里说明本 Tab 当前这个身份是刚建出来的匿名,与「刚注册」无关(§16)
+        sameSubjectTransition: false,
         bootstrapErrorCode: null,
       });
       return "ok";
@@ -148,6 +218,7 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
         set({
           status: "blocked",
           userType: null,
+          username: null,
           expiresAt: null,
           bootstrapErrorCode: error.code,
         });
@@ -168,6 +239,7 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
         set({
           status: "error",
           userType: null,
+          username: null,
           expiresAt: null,
           bootstrapErrorCode: "NETWORK_ERROR",
         });
@@ -188,7 +260,10 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
     set({
       status: "unknown",
       userType: null,
+      username: null,
       expiresAt: null,
+      // §18/§45:换主体即作废「刚注册」这件事,不留到下一个身份
+      sameSubjectTransition: false,
       identityEpoch: get().identityEpoch + 1,
       adminLoginError: null,
       logoutError: null,
@@ -198,6 +273,8 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
   return {
     status: "unknown",
     userType: null,
+    username: null,
+    sameSubjectTransition: false,
     expiresAt: null,
     identityEpoch: 0,
     bootstrapErrorCode: null,
@@ -219,6 +296,10 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
     },
 
     refreshIdentity() {
+      void get().probeIdentity();
+    },
+
+    async probeIdentity() {
       const { status } = get();
       if (
         status === "bootstrapping" ||
@@ -227,7 +308,67 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
       ) {
         return;
       }
-      void sharedBootstrap();
+      await sharedBootstrap();
+    },
+
+    consumeSameSubjectTransition() {
+      if (!get().sameSubjectTransition) return false;
+      set({ sameSubjectTransition: false });
+      return true;
+    },
+
+    async registerUser(username, password) {
+      try {
+        // §17:200 之后先立「同一主体」这件事,再让 probe 把 REGISTERED 落进 store;
+        // 身份字段的唯一出处是 attempt() 里的 GET /auth/session,不在这里另写一套。
+        await apiRegisterUser(username, password);
+        set({ sameSubjectTransition: true });
+        await get().probeIdentity();
+        return { ok: true };
+      } catch (error) {
+        // §19:失败一律不留痕 —— 不置标记、不清聊天、不动 identityEpoch
+        return { ok: false, error: toLoginError(error) };
+      }
+    },
+
+    async userLogin(username, password) {
+      try {
+        await apiUserLogin(username, password);
+        // §20:登录是全换主体,Cookie 已经换人;本地清空 + 关流 + 换文档由调用方编排
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: toLoginError(error) };
+      }
+    },
+
+    async changePassword(currentPassword, newPassword) {
+      try {
+        const session = await apiChangePassword(currentPassword, newPassword);
+        // §42:后端已轮换当前 Session 并撤销其它设备,但 userId 没变 ——
+        // 只更新身份负载,不 epoch++、不 clearIdentity,聊天视图与输入草稿都不该动。
+        set({
+          status: "authenticated",
+          userType: session.userType ?? "REGISTERED",
+          username: session.username ?? null,
+          expiresAt: session.expiresAt,
+          bootstrapErrorCode: null,
+        });
+        return { ok: true, session };
+      } catch (error) {
+        return { ok: false, error: toLoginError(error) };
+      }
+    },
+
+    async revokeAllSessions() {
+      try {
+        await apiRevokeAllSessions();
+      } catch (error) {
+        return { ok: false, error: toLoginError(error) };
+      }
+      // §43:后端删库成功即已清 Cookie。只清本地身份,不当场建匿名 ——
+      // 立刻 bootstrap 会用「新访客身份」掩盖「你刚在所有设备退出」这件事。
+      clearIdentity();
+      return { ok: true };
     },
 
     async adminLogin(password) {
@@ -239,6 +380,7 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
             adminLoginError: { code: "ADMIN_UNAVAILABLE" },
             status: "authenticated",
             userType: session.userType ?? "ANONYMOUS",
+            username: session.username ?? null,
             expiresAt: session.expiresAt,
           });
           return false;
@@ -246,6 +388,7 @@ export const useAuthStore = create<AuthStore>()((set, get) => {
         set({
           status: "authenticated",
           userType: "ADMIN",
+          username: session.username ?? null,
           expiresAt: session.expiresAt,
           adminLoginError: null,
           bootstrapErrorCode: null,
