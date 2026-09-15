@@ -100,7 +100,7 @@ export type PendingHistoryAnchor = {
 
 /**
  * §23.1 锚定 ref 真正跨越 async loadOlderMessages 存活;模块级持有
- * (_Chat 经 <_Chat key={session.id}> 同时仅一个实例,随重挂载整体销毁)
+ * (ChatInner 经 <ChatInner key={session.id}> 同时仅一个实例,随重挂载整体销毁)
  */
 export const pendingHistoryAnchorRef: {
   current: PendingHistoryAnchor | null;
@@ -283,7 +283,7 @@ export function ChatAction(props: {
 }
 
 function useScrollToBottom(
-  scrollRef: RefObject<HTMLDivElement>,
+  scrollRef: RefObject<HTMLDivElement | null>,
   detach: boolean = false,
   messages: ChatMessage[],
 ) {
@@ -461,7 +461,7 @@ export function ShortcutKeyModal(props: { onClose: () => void }) {
 
 /**
  * I3/H1:附件 owner 身份(区分 PROMOTION / SWITCH,禁止只靠 [session.id])。
- * 状态全部放外层 Chat(keyed _Chat 之外),经 props 传给 _Chat。
+ * 状态全部放外层 Chat(keyed ChatInner 之外),经 props 传给 ChatInner。
  */
 type AttachmentOwner = {
   sessionId: string;
@@ -469,7 +469,7 @@ type AttachmentOwner = {
   wasDraft: boolean;
 };
 
-/** I3:outer Chat → _Chat 的附件 composer props 组(H1;gate/epoch 全在 outer 实现) */
+/** I3:outer Chat → ChatInner 的附件 composer props 组(H1;gate/epoch 全在 outer 实现) */
 export type AttachmentController = {
   pendingImages: PendingImage[];
   isPreparingImages: boolean;
@@ -517,7 +517,7 @@ function normalizeClipboardImageNames(files: File[]): File[] {
   });
 }
 
-function _Chat(props: { attachment: AttachmentController }) {
+function ChatInner(props: { attachment: AttachmentController }) {
   const attachment = props.attachment;
   type RenderMessage = ChatMessage & { preview?: boolean };
 
@@ -1542,8 +1542,8 @@ function _Chat(props: { attachment: AttachmentController }) {
 }
 
 /**
- * I3/H1:附件 ephemeral 状态全部住在本组件(keyed `_Chat` 之外),
- * 草稿首发导致的 `_Chat` remount 不清 pending/preparing/submitting;
+ * I3/H1:附件 ephemeral 状态全部住在本组件(keyed `ChatInner` 之外),
+ * 草稿首发导致的 `ChatInner` remount 不清 pending/preparing/submitting;
  * 真切换会话由 owner transition classifier 作废(R35)。
  */
 export function Chat() {
@@ -1673,7 +1673,7 @@ export function Chat() {
   );
 
   return (
-    <_Chat
+    <ChatInner
       key={session.id}
       attachment={{
         pendingImages,
@@ -1683,6 +1683,6 @@ export function Chat() {
         removeAt,
         submit,
       }}
-    ></_Chat>
+    ></ChatInner>
   );
 }
