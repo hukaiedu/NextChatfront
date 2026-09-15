@@ -51,8 +51,10 @@ const en: LocaleType = {
     RevokeAllHint:
       "Ends every session of this account; your chats are not affected",
     PasswordChanged: "Password updated. Other devices were signed out.",
-    LoginTitle: "Sign in to your account",
-    RegisterTitle: "Create an account",
+    LoginTitle: "Welcome back",
+    LoginSubtitle: "Continue where you left off.",
+    RegisterTitle: "Create your personChat account",
+    RegisterSubtitle: "Create an account and keep your conversations.",
     Username: "Username",
     UsernamePlaceholder: "Letters, digits, _ or -, 3–32 characters",
     Password: "Password",

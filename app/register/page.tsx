@@ -10,7 +10,8 @@ import {
   credentialErrorText,
 } from "../utils/credential";
 import Locale from "../locales";
-import styles from "../components/auth-gate.module.scss";
+import { AuthLayout } from "../components/auth-layout";
+import styles from "../components/auth-layout.module.scss";
 
 /**
  * V1.4 U4 §27–§36:注册页。
@@ -84,122 +85,148 @@ export default function RegisterPage() {
   const t = Locale.Account;
 
   if (probing) {
-    return <div className={styles["auth-gate"]} aria-busy="true" />;
+    return <main className={styles["auth-page"]} aria-busy="true" />;
   }
 
   // §29:已注册不再提交注册,也不重复建匿名
   if (userType === "REGISTERED") {
     return (
-      <div className={styles["auth-gate"]}>
-        <div className={styles["form"]}>
-          <div className={styles["title"]}>{t.RegisterTitle}</div>
-          <div className={styles["error"]}>
-            {t.AlreadyRegistered(accountName ?? "")}
-          </div>
+      <AuthLayout
+        title={t.RegisterTitle}
+        description={t.RegisterSubtitle}
+        footer={
           <button
-            className={styles["submit"]}
+            className={styles.tertiary}
             type="button"
             onClick={() => router.push("/")}
           >
             {t.BackToChat}
           </button>
+        }
+      >
+        <div className={styles["state-panel"]}>
+          <div className={styles.notice}>
+            {t.AlreadyRegistered(accountName ?? "")}
+          </div>
           <button
-            className={styles["submit"]}
+            className={styles["link-action"]}
             type="button"
             onClick={() => router.push("/login")}
           >
             {t.LoginOther}
           </button>
         </div>
-      </div>
+      </AuthLayout>
     );
   }
 
   // §30:管理员身份不提交注册,也不给普通账号入口任何特权
   if (userType === "ADMIN") {
     return (
-      <div className={styles["auth-gate"]}>
-        <div className={styles["form"]}>
-          <div className={styles["title"]}>{t.RegisterTitle}</div>
-          <div className={styles["error"]}>{t.Admin}</div>
+      <AuthLayout
+        title={t.RegisterTitle}
+        description={t.RegisterSubtitle}
+        footer={
           <button
-            className={styles["submit"]}
+            className={styles.tertiary}
             type="button"
             onClick={() => router.push("/")}
           >
             {t.BackToChat}
           </button>
+        }
+      >
+        <div className={styles["state-panel"]}>
+          <div className={styles.notice}>{t.Admin}</div>
         </div>
-      </div>
+      </AuthLayout>
     );
   }
 
   return (
-    <div className={styles["auth-gate"]}>
-      <form className={styles["form"]} onSubmit={submit}>
-        <div className={styles["title"]}>{t.RegisterTitle}</div>
-        {/* §35:注册是原地升级,当前聊天记录跟着同一个账号一起走 */}
-        <div className={styles["error"]}>{t.RegisterPreserveTip}</div>
-        {/* §36:V1.4 没有找回密码,只提示,不放入口 */}
-        <div className={styles["error"]}>{t.NoRecoveryTip}</div>
-        <label htmlFor="register-username">{t.Username}</label>
-        <input
-          id="register-username"
-          className={styles["input"]}
-          type="text"
-          name="username"
-          autoComplete="username"
-          placeholder={t.UsernamePlaceholder}
-          value={username}
-          onChange={(event) => setUsername(event.currentTarget.value)}
-        />
-        <label htmlFor="register-password">{t.Password}</label>
-        <input
-          id="register-password"
-          className={styles["input"]}
-          type="password"
-          name="new-password"
-          autoComplete="new-password"
-          value={password}
-          onChange={(event) => setPassword(event.currentTarget.value)}
-        />
-        <label htmlFor="register-confirm">{t.ConfirmPassword}</label>
-        <input
-          id="register-confirm"
-          className={styles["input"]}
-          type="password"
-          name="confirm-password"
-          autoComplete="new-password"
-          value={confirmPassword}
-          onChange={(event) => setConfirmPassword(event.currentTarget.value)}
-        />
-        {error && (
-          <div id="register-error" className={styles["error"]} role="alert">
-            {error}
-          </div>
-        )}
+    <AuthLayout
+      title={t.RegisterTitle}
+      description={t.RegisterSubtitle}
+      footer={
         <button
-          className={styles["submit"]}
-          type="submit"
-          disabled={submitting || !username || !password || !confirmPassword}
-        >
-          {submitting ? t.Submitting : t.SubmitRegister}
-        </button>
-        <button
-          className={styles["submit"]}
-          type="button"
-          onClick={() => router.push("/login")}
-        >
-          {t.ToLogin}
-        </button>
-        <button
-          className={styles["submit"]}
+          className={styles.tertiary}
           type="button"
           onClick={() => router.push("/")}
         >
           {t.BackToChat}
         </button>
+      }
+    >
+      <form className={styles.form} onSubmit={submit}>
+        {/* §35:注册是原地升级,当前聊天记录跟着同一个账号一起走 */}
+        <div className={styles.notice}>{t.RegisterPreserveTip}</div>
+        {/* §36:V1.4 没有找回密码,只提示,不放入口 */}
+        <div className={styles.notice}>{t.NoRecoveryTip}</div>
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="register-username">
+            {t.Username}
+          </label>
+          <input
+            id="register-username"
+            className={styles.input}
+            type="text"
+            name="username"
+            autoComplete="username"
+            placeholder={t.UsernamePlaceholder}
+            value={username}
+            onChange={(event) => setUsername(event.currentTarget.value)}
+          />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="register-password">
+            {t.Password}
+          </label>
+          <input
+            id="register-password"
+            className={styles.input}
+            type="password"
+            name="new-password"
+            autoComplete="new-password"
+            value={password}
+            onChange={(event) => setPassword(event.currentTarget.value)}
+          />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="register-confirm">
+            {t.ConfirmPassword}
+          </label>
+          <input
+            id="register-confirm"
+            className={styles.input}
+            type="password"
+            name="confirm-password"
+            autoComplete="new-password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.currentTarget.value)}
+          />
+        </div>
+        {error && (
+          <div id="register-error" className={styles.error} role="alert">
+            {error}
+          </div>
+        )}
+        <button
+          className={styles.primary}
+          type="submit"
+          disabled={submitting || !username || !password || !confirmPassword}
+        >
+          {submitting ? t.Submitting : t.SubmitRegister}
+        </button>
+        <div className={styles["secondary-row"]}>
+          <button
+            className={styles["link-action"]}
+            type="button"
+            onClick={() => router.push("/login")}
+          >
+            {t.ToLogin}
+          </button>
+        </div>
       </form>
-    </div>
+    </AuthLayout>
   );
 }
