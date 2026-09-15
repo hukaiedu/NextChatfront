@@ -20,6 +20,22 @@
 
   /* stroke */
   --border-in-light: 1px solid rgb(222, 222, 222);
+
+  /* V1.5 聊天优先布局:新增 token,不改动上面的既有变量 */
+  --color-canvas: #fbfbfa;
+  --color-sidebar: #f4f4f2;
+  --color-surface: #ffffff;
+  --color-surface-soft: rgba(31, 31, 31, 0.04);
+  --color-bubble-user: #f1f2f4;
+  --color-text: rgb(45, 48, 51);
+  --color-text-soft: rgb(138, 143, 150);
+  --color-line: rgba(31, 31, 31, 0.08);
+  --color-line-strong: rgba(31, 31, 31, 0.14);
+  --shadow-soft: 0 1px 2px rgba(31, 31, 31, 0.04);
+  --shadow-float: 0 6px 24px -12px rgba(31, 31, 31, 0.18);
+  --composer-radius: 22px;
+  --bubble-radius: 18px;
+  --chat-column-width: 850px;
 }
 
 @mixin dark {
@@ -38,6 +54,22 @@
   --border-in-light: 1px solid rgba(255, 255, 255, 0.192);
 
   --theme-color: var(--gray);
+
+  /* V1.5 聊天优先布局:与 light 同名,深色取值 */
+  --color-canvas: #1f2022;
+  --color-sidebar: #191a1c;
+  --color-surface: #26272a;
+  --color-surface-soft: rgba(255, 255, 255, 0.06);
+  --color-bubble-user: #2e3033;
+  --color-text: rgb(222, 224, 227);
+  --color-text-soft: rgb(148, 152, 158);
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.14);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-float: 0 6px 24px -12px rgba(0, 0, 0, 0.6);
+  --composer-radius: 22px;
+  --bubble-radius: 18px;
+  --chat-column-width: 850px;
 
   div:not(.no-dark) > svg {
     filter: invert(0.5);
@@ -61,9 +93,9 @@
 
   --window-width: 90vw;
   --window-height: 90vh;
-  --sidebar-width: 300px;
+  --sidebar-width: 260px;
   --window-content-width: calc(100% - var(--sidebar-width));
-  --message-max-width: 80%;
+  --message-max-width: 100%;
   --full-height: 100%;
 }
 
@@ -95,7 +127,7 @@ html {
 }
 
 body {
-  background-color: var(--gray);
+  background-color: var(--color-canvas);
   color: var(--black);
   margin: 0;
   padding: 0;
@@ -107,10 +139,6 @@ body {
   user-select: none;
   touch-action: pan-x pan-y;
   overflow: hidden;
-
-  @media only screen and (max-width: 600px) {
-    background-color: var(--second);
-  }
 
   *:focus-visible {
     outline: none;

@@ -1,10 +1,10 @@
 @import "../styles/animation.scss";
 
 .attach-images {
-  position: absolute;
-  left: 30px;
-  bottom: 32px;
   display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 14px 0;
 }
 
 .attach-image {
@@ -13,7 +13,6 @@
   height: 64px;
   border: rgba($color: #888, $alpha: 0.2) 1px solid;
   border-radius: 5px;
-  margin-right: 10px;
   background-size: cover;
   background-position: center;
   background-color: var(--white);
@@ -293,6 +292,22 @@
   flex-direction: column;
   position: relative;
   height: 100%;
+  background-color: var(--color-canvas);
+}
+
+.chat-header {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--color-line);
+
+  :global(.window-header-main-title) {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  :global(.window-header-sub-title) {
+    font-size: 12px;
+    color: var(--color-text-soft);
+  }
 }
 
 .chat-body {
@@ -303,6 +318,38 @@
   padding-bottom: 40px;
   position: relative;
   overscroll-behavior: none;
+}
+
+/* 空白首页:问候语 + Composer 作为一组垂直居中,不引入欢迎卡片 */
+.chat-empty {
+  .chat-body-container {
+    justify-content: center;
+  }
+
+  .chat-body {
+    flex: 0 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-bottom: 0;
+  }
+
+  .chat-input-panel {
+    padding-top: 20px;
+  }
+}
+
+.chat-empty-state {
+  width: 100%;
+  max-width: var(--chat-column-width);
+  text-align: center;
+}
+
+.chat-empty-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--color-text);
 }
 
 /* PAG-2 §25:顶部历史分页 loading / error+retry / 隐形 sentinel */
@@ -347,6 +394,10 @@
 .chat-message {
   display: flex;
   flex-direction: row;
+  width: 100%;
+  max-width: var(--chat-column-width);
+  margin-left: auto;
+  margin-right: auto;
 
   &:last-child {
     animation: slide-in ease 0.3s;
@@ -356,6 +407,10 @@
 .chat-message-user {
   display: flex;
   flex-direction: row-reverse;
+  width: 100%;
+  max-width: var(--chat-column-width);
+  margin-left: auto;
+  margin-right: auto;
 
   .chat-message-header {
     flex-direction: row-reverse;
@@ -470,13 +525,13 @@
   box-sizing: border-box;
   max-width: 100%;
   margin-top: 10px;
-  border-radius: 10px;
-  background-color: rgba(0, 0, 0, 0.05);
-  padding: 10px;
+  border-radius: var(--bubble-radius);
+  background-color: transparent;
+  padding: 2px 0 8px;
   font-size: 14px;
   user-select: text;
   word-break: break-word;
-  border: var(--border-in-light);
+  border: none;
   position: relative;
   transition: all ease 0.3s;
 }
@@ -599,7 +654,8 @@
 }
 
 .chat-message-user > .chat-message-container > .chat-message-item {
-  background-color: var(--second);
+  background-color: var(--color-bubble-user);
+  padding: 10px 16px;
 
   &:hover {
     min-width: 0;
@@ -609,17 +665,26 @@
 .chat-input-panel {
   position: relative;
   width: 100%;
-  padding: 20px;
-  padding-top: 10px;
+  padding: 8px 20px 18px;
   box-sizing: border-box;
+  display: flex;
   flex-direction: column;
-  border-top: var(--border-in-light);
-  box-shadow: var(--card-shadow);
+  align-items: center;
 
   .chat-input-actions {
-    .chat-input-action {
-      margin-bottom: 10px;
-    }
+    width: 100%;
+    max-width: var(--chat-column-width);
+    justify-content: flex-start;
+    margin-bottom: 6px;
+  }
+
+  /* Composer 周边的动作都收成轻软胶囊,不再各自带边框卡片 */
+  .chat-input-action {
+    height: 28px;
+    margin-bottom: 0;
+    border: none;
+    box-shadow: none;
+    background-color: var(--color-surface-soft);
   }
 }
 
@@ -632,6 +697,7 @@
 .prompt-hints {
   min-height: 20px;
   width: 100%;
+  max-width: var(--chat-column-width);
   max-height: 50vh;
   overflow: auto;
   display: flex;
@@ -680,54 +746,95 @@
 .chat-input-panel-inner {
   cursor: text;
   display: flex;
-  flex: 1;
-  border-radius: 10px;
-  border: var(--border-in-light);
+  flex-direction: column;
+  width: 100%;
+  max-width: var(--chat-column-width);
+  box-sizing: border-box;
+  border-radius: var(--composer-radius);
+  border: 1px solid var(--color-line);
+  background-color: var(--color-surface);
+  box-shadow: var(--shadow-soft);
+  transition:
+    border-color ease 0.2s,
+    box-shadow ease 0.2s;
 }
 
-.chat-input-panel-inner-attach {
-  padding-bottom: 80px;
-}
-
-.chat-input-panel-inner:has(.chat-input:focus) {
-  border: 1px solid var(--primary);
+.chat-input-panel-inner:focus-within {
+  border-color: var(--color-line-strong);
+  box-shadow: var(--shadow-float);
 }
 
 .chat-input {
-  height: 100%;
   width: 100%;
-  border-radius: 10px;
   border: none;
-  box-shadow: 0 -2px 5px rgba(0, 0, 0, 0.03);
-  background-color: var(--white);
+  background-color: transparent;
   color: var(--black);
   font-family: inherit;
-  padding: 10px 90px 10px 14px;
+  padding: 14px 18px 4px;
   resize: none;
   outline: none;
   box-sizing: border-box;
-  min-height: 68px;
+  min-height: 48px;
 }
 
-.chat-input:focus {
+.chat-input-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+  padding: 4px 10px 10px 14px;
+}
+
+/* 工具条里的动作(上传图片)不在 .chat-input-actions 内,拿不到那套 hover 展开样式,
+   这里给一枚常驻文字的轻软胶囊,避免图标与文字竖排溢出卡片 */
+.chat-input-panel .chat-input-toolbar .chat-input-action {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 16px;
+  background-color: var(--color-surface-soft);
+  box-shadow: none;
+  font-size: 12px;
+  color: var(--color-text);
+  overflow: hidden;
+
+  .icon {
+    display: flex;
+    align-items: center;
+  }
+
+  .text {
+    white-space: nowrap;
+    padding-left: 5px;
+    opacity: 1;
+    transform: none;
+    pointer-events: none;
+  }
+}
+
+.chat-input-toolbar-left,
+.chat-input-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-input-toolbar-right {
+  margin-left: auto;
 }
 
 .chat-input-send {
   background-color: var(--primary);
   color: white;
-
-  position: absolute;
-  right: 30px;
-  bottom: 32px;
 }
 
 @media only screen and (max-width: 600px) {
   .chat-input {
     font-size: 16px;
-  }
-
-  .chat-input-send {
-    bottom: 30px;
   }
 }
 
@@ -803,5 +910,25 @@
     &-show {
       transform: translateX(0);
     }
+  }
+}
+
+/* Phase 5:窄屏收紧留白,Composer 仍占满宽度且不横向滚动 */
+@media only screen and (max-width: 600px) {
+  .chat-header {
+    padding: 10px 12px;
+  }
+
+  .chat-body {
+    padding: 12px;
+    padding-bottom: 20px;
+  }
+
+  .chat-input-panel {
+    padding: 6px 12px 12px;
+  }
+
+  .chat-empty-title {
+    font-size: 18px;
   }
 }

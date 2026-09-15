@@ -3,12 +3,13 @@ import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import styles from "./home.module.scss";
 
 import { IconButton } from "./button";
+import BotIcon from "../icons/bot.svg";
 import SettingsIcon from "../icons/settings.svg";
-import ChatGptIcon from "../icons/chatgpt.svg";
 import AddIcon from "../icons/add.svg";
 import DeleteIcon from "../icons/delete.svg";
 import MaskIcon from "../icons/mask.svg";
 import McpIcon from "../icons/mcp.svg";
+import MenuIcon from "../icons/menu.svg";
 import DragIcon from "../icons/drag.svg";
 import DiscoveryIcon from "../icons/discovery.svg";
 import ArchiveIcon from "../icons/archive.svg";
@@ -16,6 +17,7 @@ import ArchiveIcon from "../icons/archive.svg";
 import Locale from "../locales";
 
 import { useAppConfig, useChatStore } from "../store";
+import { useAuthStore } from "../store/auth";
 
 import {
   DEFAULT_SIDEBAR_WIDTH,
@@ -26,6 +28,7 @@ import {
 } from "../constant";
 
 import { Link, useNavigate } from "react-router-dom";
+import { useRouter } from "next/navigation";
 import { isIOS, useMobileScreen } from "../utils";
 import dynamic from "next/dynamic";
 import { Selector, showConfirm } from "./ui-lib";
@@ -130,6 +133,7 @@ export function useDragSideBar() {
 
   return {
     onDragStart,
+    toggleSideBar,
     shouldNarrow,
   };
 }
@@ -171,10 +175,11 @@ export function SideBarHeader(props: {
   title?: string | React.ReactNode;
   subTitle?: string | React.ReactNode;
   logo?: React.ReactNode;
+  action?: React.ReactNode;
   children?: React.ReactNode;
   shouldNarrow?: boolean;
 }) {
-  const { title, subTitle, logo, children, shouldNarrow } = props;
+  const { title, subTitle, logo, action, children, shouldNarrow } = props;
   return (
     <Fragment>
       <div
@@ -183,13 +188,16 @@ export function SideBarHeader(props: {
         })}
         data-tauri-drag-region
       >
+        <div className={clsx(styles["sidebar-logo"], "no-dark")}>{logo}</div>
         <div className={styles["sidebar-title-container"]}>
           <div className={styles["sidebar-title"]} data-tauri-drag-region>
             {title}
           </div>
           <div className={styles["sidebar-sub-title"]}>{subTitle}</div>
         </div>
-        <div className={clsx(styles["sidebar-logo"], "no-dark")}>{logo}</div>
+        {action && (
+          <div className={styles["sidebar-header-action"]}>{action}</div>
+        )}
       </div>
       {children}
     </Fragment>
@@ -222,9 +230,64 @@ export function SideBarTail(props: {
   );
 }
 
+/**
+ * 侧边栏底部的当前身份入口。只读 useAuthStore 里由后端 Session 探测出来的身份,
+ * 登录/登出/改密码仍在设置页的 AccountSection —— 这里不复制任何认证逻辑。
+ */
+function SideBarIdentity() {
+  const userType = useAuthStore((state) => state.userType);
+  const username = useAuthStore((state) => state.username);
+  const router = useRouter();
+  const t = Locale.Account;
+
+  if (userType === "REGISTERED") {
+    return (
+      <Link
+        to={Path.Settings}
+        className={styles["sidebar-identity"]}
+        data-sidebar-identity="registered"
+      >
+        <span className={styles["identity-label"]}>
+          {t.CurrentAccount(username ?? "")}
+        </span>
+        <SettingsIcon />
+      </Link>
+    );
+  }
+
+  if (userType === "ADMIN") {
+    return (
+      <div
+        className={styles["sidebar-identity"]}
+        role="button"
+        tabIndex={0}
+        data-sidebar-identity="admin"
+        onClick={() => window.location.assign("/admin")}
+      >
+        <span className={styles["identity-label"]}>{t.Admin}</span>
+        <SettingsIcon />
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles["sidebar-identity"]} data-sidebar-identity="guest">
+      <span className={styles["identity-label"]}>{t.Visitor}</span>
+      <button
+        type="button"
+        className={styles["identity-login"]}
+        data-sidebar-login
+        onClick={() => router.push("/login")}
+      >
+        {t.Login}
+      </button>
+    </div>
+  );
+}
+
 export function SideBar(props: { className?: string }) {
   useHotKey();
-  const { onDragStart, shouldNarrow } = useDragSideBar();
+  const { onDragStart, toggleSideBar, shouldNarrow } = useDragSideBar();
   const [showDiscoverySelector, setshowDiscoverySelector] = useState(false);
   const navigate = useNavigate();
   const config = useAppConfig();
@@ -252,11 +315,31 @@ export function SideBar(props: { className?: string }) {
       {...props}
     >
       <SideBarHeader
-        title="NextChat"
-        subTitle="Build your own AI assistant."
-        logo={<ChatGptIcon />}
+        title="personChat"
+        logo={<BotIcon />}
         shouldNarrow={shouldNarrow}
+        action={
+          <IconButton
+            aria={Locale.Home.CollapseSidebar}
+            title={Locale.Home.CollapseSidebar}
+            icon={<MenuIcon />}
+            onClick={toggleSideBar}
+          />
+        }
       >
+        <IconButton
+          className={styles["sidebar-new-chat"]}
+          icon={<AddIcon />}
+          text={shouldNarrow ? undefined : Locale.Home.NewChat}
+          onClick={() => {
+            if (config.dontShowMaskSplashScreen) {
+              chatStore.newSession();
+              navigate(Path.Chat);
+            } else {
+              navigate(Path.NewChat);
+            }
+          }}
+        />
         <div className={styles["sidebar-header-bar"]}>
           <IconButton
             icon={<MaskIcon />}
@@ -317,7 +400,8 @@ export function SideBar(props: { className?: string }) {
         <ChatList narrow={shouldNarrow} />
       </SideBarBody>
       <SideBarTail
-        primaryAction={
+        primaryAction={<SideBarIdentity />}
+        secondaryAction={
           <>
             <div className={clsx(styles["sidebar-action"], styles.mobile)}>
               <IconButton
@@ -352,21 +436,6 @@ export function SideBar(props: { className?: string }) {
               </Link>
             </div>
           </>
-        }
-        secondaryAction={
-          <IconButton
-            icon={<AddIcon />}
-            text={shouldNarrow ? undefined : Locale.Home.NewChat}
-            onClick={() => {
-              if (config.dontShowMaskSplashScreen) {
-                chatStore.newSession();
-                navigate(Path.Chat);
-              } else {
-                navigate(Path.NewChat);
-              }
-            }}
-            shadow
-          />
         }
       />
     </SideBarContainer>

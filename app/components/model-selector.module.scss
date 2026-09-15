@@ -24,6 +24,14 @@
   box-shadow: var(--card-shadow);
 }
 
+/* Composer 贴底:菜单向上展开,并从左边缘对齐,不超出阅读列 */
+.anchor-up .menu {
+  top: auto;
+  bottom: calc(100% + 4px);
+  right: auto;
+  left: 0;
+}
+
 .item {
   display: flex;
   align-items: center;

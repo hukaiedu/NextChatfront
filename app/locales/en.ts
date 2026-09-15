@@ -249,6 +249,7 @@ const en: LocaleType = {
   },
   Home: {
     NewChat: "New Chat",
+    CollapseSidebar: "Collapse sidebar",
     DeleteChat: "Confirm to delete the selected conversation?",
     DeleteToast: "Chat Deleted",
     Revert: "Revert",

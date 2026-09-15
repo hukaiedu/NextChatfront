@@ -11,7 +11,7 @@ const RETRY_VALUE = "__retry_load_models__";
 const DEFAULT_VALUE = "";
 
 /**
- * M4:聊天头部的模型选择器(紧凑下拉框)。
+ * M4:模型选择器(紧凑下拉框,现在 Composer 底部左侧)。
  *
  * - 会话模型偏好存在后端 Conversation.preferredModelKey,这里只读显示 + PATCH 保存
  * - null = 默认模型(默认选项,选中后 PATCH null 清除偏好,绝不伪造"默认"键)
@@ -20,7 +20,7 @@ const DEFAULT_VALUE = "";
  * - 目录来自 GET /api/provider/models;带偏好的会话进入聊天页即拉取以解析 label,
  *   其余会话首次打开时拉取,失败在列表里给重试项(§十六/§十七)
  */
-export function ModelSelectorButton() {
+export function ModelSelectorButton(props: { dropUp?: boolean }) {
   const chatStore = useChatStore();
   const session = chatStore.currentSession();
   const catalog = chatStore.modelCatalog;
@@ -99,7 +99,11 @@ export function ModelSelectorButton() {
   };
 
   return (
-    <div className={styles["anchor"]}>
+    <div
+      className={`${styles["anchor"]}${
+        props.dropUp ? ` ${styles["anchor-up"]}` : ""
+      }`}
+    >
       <div className="window-action-button">
         <IconButton
           icon={<DownIcon />}

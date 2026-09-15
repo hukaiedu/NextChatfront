@@ -338,9 +338,6 @@ export function ChatActions(props: {
   showPromptHints: () => void;
   hitBottom: boolean;
   setShowShortcutKeyModal: React.Dispatch<React.SetStateAction<boolean>>;
-  uploadImage?: () => void;
-  uploadDisabled?: boolean;
-  uploadInProgress?: boolean;
 }) {
   const config = useAppConfig();
 
@@ -360,20 +357,6 @@ export function ChatActions(props: {
   return (
     <div className={styles["chat-input-actions"]}>
       <>
-        {props.uploadImage && (
-          <ChatAction
-            onClick={() => {
-              if (props.uploadDisabled) return;
-              props.uploadImage?.();
-            }}
-            text={
-              props.uploadInProgress
-                ? Locale.Chat.ImagePreparing
-                : Locale.Chat.InputActions.UploadImage
-            }
-            icon={<ImageIcon />}
-          />
-        )}
         {!props.hitBottom && (
           <ChatAction
             onClick={props.scrollToBottom}
@@ -1102,10 +1085,19 @@ function _Chat(props: { attachment: AttachmentController }) {
     };
   }, [messages, chatStore, navigate]);
 
+  // §4:空白首页 —— 会话确实没有消息时才给问候语(未加载完的历史不算)
+  const isEmptyChat = messages.length === 0 && session.loaded !== false;
+
   return (
     <>
-      <div className={styles.chat} key={session.id}>
-        <div className="window-header" data-tauri-drag-region>
+      <div
+        className={clsx(styles.chat, { [styles["chat-empty"]]: isEmptyChat })}
+        key={session.id}
+      >
+        <div
+          className={clsx("window-header", styles["chat-header"])}
+          data-tauri-drag-region
+        >
           {isMobileScreen && (
             <div className="window-actions">
               <div className={"window-action-button"}>
@@ -1136,7 +1128,6 @@ function _Chat(props: { attachment: AttachmentController }) {
             </div>
           </div>
           <div className="window-actions">
-            <ModelSelectorButton />
             <div className="window-action-button">
               <IconButton
                 icon={<ReloadIcon />}
@@ -1214,6 +1205,16 @@ function _Chat(props: { attachment: AttachmentController }) {
                 setAutoScroll(false);
               }}
             >
+              {isEmptyChat && (
+                <div
+                  className={styles["chat-empty-state"]}
+                  data-empty-state="true"
+                >
+                  <div className={styles["chat-empty-title"]}>
+                    {Locale.Store.BotHello}
+                  </div>
+                </div>
+              )}
               {hasHistoryMore &&
                 (session.loadingOlderMessages ? (
                   <div
@@ -1409,9 +1410,6 @@ function _Chat(props: { attachment: AttachmentController }) {
                   onSearch("");
                 }}
                 setShowShortcutKeyModal={setShowShortcutKeyModal}
-                uploadImage={() => fileInputRef.current?.click()}
-                uploadDisabled={attachmentDisabled}
-                uploadInProgress={attachment.isPreparingImages}
               />
               <input
                 ref={fileInputRef}
@@ -1427,11 +1425,7 @@ function _Chat(props: { attachment: AttachmentController }) {
                 }}
               />
               <label
-                className={clsx(
-                  styles["chat-input-panel-inner"],
-                  attachment.pendingImages.length > 0 &&
-                    styles["chat-input-panel-inner-attach"],
-                )}
+                className={styles["chat-input-panel-inner"]}
                 htmlFor="chat-input"
               >
                 {attachment.pendingImages.length > 0 && (
@@ -1467,6 +1461,7 @@ function _Chat(props: { attachment: AttachmentController }) {
                   ref={inputRef}
                   className={styles["chat-input"]}
                   placeholder={Locale.Chat.Input(submitKey)}
+                  aria-label={Locale.Chat.Input(submitKey)}
                   onInput={(e) => onInput(e.currentTarget.value)}
                   onPaste={onPasteImages}
                   value={userInput}
@@ -1476,32 +1471,57 @@ function _Chat(props: { attachment: AttachmentController }) {
                   rows={inputRows}
                   autoFocus={autoFocus}
                   style={{
-                    fontSize: config.fontSize,
+                    // 内联字号优先级高于窄屏 16px 规则,iOS 低于 16px 聚焦会整页放大
+                    fontSize: isMobileScreen
+                      ? Math.max(config.fontSize ?? 14, 16)
+                      : config.fontSize,
                     fontFamily: config.fontFamily,
                   }}
                 />
-                {session.pendingRequestId ? (
-                  <IconButton
-                    icon={<PauseIcon />}
-                    text={Locale.Chat.InputActions.Stop}
-                    className={styles["chat-input-send"]}
-                    type="primary"
-                    disabled={session.cancelling}
-                    onClick={() => chatStore.cancelRequest(session.id)}
-                  />
-                ) : (
-                  <IconButton
-                    icon={<SendWhiteIcon />}
-                    text={Locale.Chat.Send}
-                    className={styles["chat-input-send"]}
-                    type="primary"
-                    disabled={
-                      attachment.isPreparingImages ||
-                      attachment.isSubmittingMessage
-                    }
-                    onClick={() => doSubmit(userInput)}
-                  />
-                )}
+                <div
+                  className={styles["chat-input-toolbar"]}
+                  data-composer-toolbar="true"
+                >
+                  <div className={styles["chat-input-toolbar-left"]}>
+                    <ModelSelectorButton dropUp />
+                  </div>
+                  <div className={styles["chat-input-toolbar-right"]}>
+                    <ChatAction
+                      onClick={() => {
+                        if (attachmentDisabled) return;
+                        fileInputRef.current?.click();
+                      }}
+                      text={
+                        attachment.isPreparingImages
+                          ? Locale.Chat.ImagePreparing
+                          : Locale.Chat.InputActions.UploadImage
+                      }
+                      icon={<ImageIcon />}
+                    />
+                    {session.pendingRequestId ? (
+                      <IconButton
+                        icon={<PauseIcon />}
+                        text={Locale.Chat.InputActions.Stop}
+                        className={styles["chat-input-send"]}
+                        type="primary"
+                        disabled={session.cancelling}
+                        onClick={() => chatStore.cancelRequest(session.id)}
+                      />
+                    ) : (
+                      <IconButton
+                        icon={<SendWhiteIcon />}
+                        text={Locale.Chat.Send}
+                        className={styles["chat-input-send"]}
+                        type="primary"
+                        disabled={
+                          attachment.isPreparingImages ||
+                          attachment.isSubmittingMessage
+                        }
+                        onClick={() => doSubmit(userInput)}
+                      />
+                    )}
+                  </div>
+                </div>
               </label>
             </div>
           </div>
