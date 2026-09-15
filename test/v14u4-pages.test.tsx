@@ -340,6 +340,18 @@ function clickDialogButton(label: string) {
 }
 
 describe("/login 页面(V1.4 U4 §78)", () => {
+  test("AUTH-UI-01 使用 personChat auth layout,并保留三条导航意图", async () => {
+    render(React.createElement(LoginPage));
+    await act(settle);
+
+    expect(screen.getByText("personChat")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: t.LoginTitle })).toBeTruthy();
+    expect(screen.getByText(t.LoginSubtitle)).toBeTruthy();
+    expect(screen.getByRole("button", { name: t.SubmitLogin })).toBeTruthy();
+    expect(screen.getByRole("button", { name: t.ToRegister })).toBeTruthy();
+    expect(screen.getByRole("button", { name: t.BackToChat })).toBeTruthy();
+  });
+
   test("PAGE-LOGIN-01 只探测身份,绝不顺手建匿名 Session(§22)", async () => {
     render(React.createElement(LoginPage));
     await act(settle);
@@ -487,6 +499,22 @@ describe("/login 页面(V1.4 U4 §78)", () => {
 });
 
 describe("/register 页面(V1.4 U4 §78)", () => {
+  test("AUTH-UI-02 使用 personChat auth layout,并保留注册提示与导航", async () => {
+    render(React.createElement(RegisterPage));
+    await act(settle);
+
+    expect(screen.getByText("personChat")).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: t.RegisterTitle }),
+    ).toBeTruthy();
+    expect(screen.getByText(t.RegisterSubtitle)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: t.SubmitRegister }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: t.ToLogin })).toBeTruthy();
+    expect(screen.getByRole("button", { name: t.BackToChat })).toBeTruthy();
+  });
+
   test("PAGE-REGISTER-01 未认证打开 → 先建匿名身份再允许注册(§28)", async () => {
     cookie = false;
     render(React.createElement(RegisterPage));

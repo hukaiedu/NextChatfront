@@ -8,7 +8,8 @@ import { LoginError, useAuthStore } from "../store/auth";
 import { credentialErrorText } from "../utils/credential";
 import { leaveIdentityAndReload } from "../utils/identity";
 import Locale from "../locales";
-import styles from "../components/auth-gate.module.scss";
+import { AuthLayout } from "../components/auth-layout";
+import styles from "../components/auth-layout.module.scss";
 
 /**
  * V1.4 U4 §22–§26:注册用户登录页。
@@ -78,78 +79,90 @@ export default function LoginPage() {
   };
 
   if (probing) {
-    return <div className={styles["auth-gate"]} aria-busy="true" />;
+    return <main className={styles["auth-page"]} aria-busy="true" />;
   }
 
   const t = Locale.Account;
   const current = identity?.userType;
 
   return (
-    <div className={styles["auth-gate"]}>
-      <form className={styles["form"]} onSubmit={submit}>
-        <div className={styles["title"]}>{t.LoginTitle}</div>
-        {/* §24:本地是访客时讲清楚「不会合并」;§25:已注册时允许换账号;
-            §26:管理员只是提示,不给特权也不自动调 Admin 接口 */}
-        {current === "ANONYMOUS" && (
-          <div className={styles["error"]}>{t.LoginSwitchTip}</div>
-        )}
-        {current === "REGISTERED" && (
-          <div className={styles["error"]}>
-            <div>{t.CurrentAccount(identity?.username ?? "")}</div>
-            <div>{t.SwitchAccountWarning}</div>
-          </div>
-        )}
-        {current === "ADMIN" && (
-          <div className={styles["error"]}>{t.Admin}</div>
-        )}
-        <label htmlFor="login-username">{t.Username}</label>
-        <input
-          id="login-username"
-          className={styles["input"]}
-          type="text"
-          name="username"
-          autoComplete="username"
-          placeholder={t.UsernamePlaceholder}
-          value={username}
-          onChange={(event) => setUsername(event.currentTarget.value)}
-        />
-        <label htmlFor="login-password">{t.Password}</label>
-        <input
-          id="login-password"
-          className={styles["input"]}
-          type="password"
-          name="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(event) => setPassword(event.currentTarget.value)}
-        />
-        {error && (
-          <div id="login-error" className={styles["error"]} role="alert">
-            {credentialErrorText(error)}
-          </div>
-        )}
+    <AuthLayout
+      title={t.LoginTitle}
+      description={t.LoginSubtitle}
+      footer={
         <button
-          className={styles["submit"]}
-          type="submit"
-          disabled={submitting || !username || !password}
-        >
-          {submitting ? t.Submitting : t.SubmitLogin}
-        </button>
-        <button
-          className={styles["submit"]}
-          type="button"
-          onClick={() => router.push("/register")}
-        >
-          {t.ToRegister}
-        </button>
-        <button
-          className={styles["submit"]}
+          className={styles.tertiary}
           type="button"
           onClick={() => router.push("/")}
         >
           {t.BackToChat}
         </button>
+      }
+    >
+      <form className={styles.form} onSubmit={submit}>
+        {/* §24:本地是访客时讲清楚「不会合并」;§25:已注册时允许换账号;
+            §26:管理员只是提示,不给特权也不自动调 Admin 接口 */}
+        {current === "ANONYMOUS" && (
+          <div className={styles.notice}>{t.LoginSwitchTip}</div>
+        )}
+        {current === "REGISTERED" && (
+          <div className={styles.notice}>
+            <div>{t.CurrentAccount(identity?.username ?? "")}</div>
+            <div>{t.SwitchAccountWarning}</div>
+          </div>
+        )}
+        {current === "ADMIN" && <div className={styles.notice}>{t.Admin}</div>}
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="login-username">
+            {t.Username}
+          </label>
+          <input
+            id="login-username"
+            className={styles.input}
+            type="text"
+            name="username"
+            autoComplete="username"
+            placeholder={t.UsernamePlaceholder}
+            value={username}
+            onChange={(event) => setUsername(event.currentTarget.value)}
+          />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="login-password">
+            {t.Password}
+          </label>
+          <input
+            id="login-password"
+            className={styles.input}
+            type="password"
+            name="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.currentTarget.value)}
+          />
+        </div>
+        {error && (
+          <div id="login-error" className={styles.error} role="alert">
+            {credentialErrorText(error)}
+          </div>
+        )}
+        <button
+          className={styles.primary}
+          type="submit"
+          disabled={submitting || !username || !password}
+        >
+          {submitting ? t.Submitting : t.SubmitLogin}
+        </button>
+        <div className={styles["secondary-row"]}>
+          <button
+            className={styles["link-action"]}
+            type="button"
+            onClick={() => router.push("/register")}
+          >
+            {t.ToRegister}
+          </button>
+        </div>
       </form>
-    </div>
+    </AuthLayout>
   );
 }
