@@ -383,7 +383,7 @@ SiliconFlow API URL입니다.
 
 ## 요구 사항 (Requirements)
 
-NodeJS >= 18, Docker >= 20
+NodeJS >= 24, Docker >= 20
 
 ## 개발 (Development)
 
