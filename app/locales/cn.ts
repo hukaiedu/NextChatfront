@@ -88,7 +88,7 @@ const cn = {
       /** §56：用户名不存在 / 密码错 / 已停用，全收成同一句 */
       AUTH_INVALID_CREDENTIALS: "用户名或密码错误",
       AUTH_REQUIRED: "登录状态已失效，请重新登录",
-      AUTH_FORBIDDEN: "当前站点未开放账号功能",
+      AUTH_FORBIDDEN: "账号功能当前未启用，请联系站点管理员。",
       AUTH_RATE_LIMITED: (seconds: number) =>
         `请求过于频繁，请 ${seconds} 秒后重试`,
       /** §58：503 绝不能被渲染成「密码错误」 */
