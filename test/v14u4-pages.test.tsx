@@ -663,6 +663,18 @@ describe("/register 页面(V1.4 U4 §78)", () => {
     expect(callsTo(REGISTER)).toHaveLength(1);
     expect(useAuthStore.getState().username).toBe("alice");
   });
+
+  test("PAGE-REGISTER-09 账号功能未启用时显示明确业务错误,不显示旧文案", async () => {
+    credentialFailure = () => fail(403, "AUTH_FORBIDDEN");
+    render(React.createElement(RegisterPage));
+    await act(settle);
+
+    await submitRegister("alice", "Passw0rd!", "Passw0rd!");
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe(t.Error.AUTH_FORBIDDEN);
+    expect(alert.textContent).not.toContain("当前站点未开放账号功能");
+  });
 });
 
 describe("Settings 账号区(V1.4 U4 §79)", () => {

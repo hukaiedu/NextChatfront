@@ -93,7 +93,8 @@ const en: LocaleType = {
       /** §56：unknown username, wrong password and disabled all collapse here */
       AUTH_INVALID_CREDENTIALS: "Incorrect username or password",
       AUTH_REQUIRED: "Your session has changed, please sign in again",
-      AUTH_FORBIDDEN: "Accounts are not enabled on this site",
+      AUTH_FORBIDDEN:
+        "Account features are currently disabled. Contact the site administrator.",
       AUTH_RATE_LIMITED: (seconds: number) =>
         `Too many attempts, try again in ${seconds} seconds`,
       /** §58：503 must never read as "wrong password" */

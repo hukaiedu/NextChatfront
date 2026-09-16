@@ -158,7 +158,7 @@ BACKEND_ORIGIN/api/*
 
 未设置 `BACKEND_ORIGIN` 时默认为 `http://127.0.0.1:3010`。该变量只在启动时读取一次,修改后需重启 dev server / 重新构建。
 
-## V1.4 身份与账号体验
+## V1.6 身份与账号体验
 
 身份只有 `ANONYMOUS`、`REGISTERED`、`ADMIN`。普通用户使用 username/password：
 
@@ -169,6 +169,8 @@ BACKEND_ORIGIN/api/*
 - logout、revoke-all、identity lost 是真正的 subject transition；多 Tab 在 focus/visibility 时重新 probe，mutation 不自动 replay。
 
 前端不实现 email、OAuth、2FA、password recovery 或 account deletion。Session 由 Backend 以随机 opaque token 管理，数据库只保存 token 的 SHA-256 hash；前端不读取 Cookie。
+
+V1.6 发布范围：支持游客模式、游客注册升级、登录、登出和修改密码；暂不支持邮箱验证、找回密码、OAuth、2FA 或多设备账号管理。正式开放由 Backend 部署配置控制：生产环境必须启用 `AUTH_ENABLED=true`，并配置安全的账号密码与 HTTPS Origin 白名单。
 
 ## 启动开发环境
 
