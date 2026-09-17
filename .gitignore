@@ -51,3 +51,37 @@ masks.json
 
 # mcp config
 app/mcp/mcp_config.json
+
+# local acceptance reports and logs
+/docs/*-report.md
+/docs/*_REPORT.md
+*.log
+
+# local build cache
+/.swc/
+
+# local-only agent metadata
+AGENTS.md
+.qoder/skills/
+
+# OS, editor, and temporary files
+Thumbs.db
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+*.pid
+/tmp/
+/.cache/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# local environment files (keep the checked-in template)
+.env.*
+!.env.template
