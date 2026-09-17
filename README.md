@@ -158,6 +158,17 @@ BACKEND_ORIGIN/api/*
 
 未设置 `BACKEND_ORIGIN` 时默认为 `http://127.0.0.1:3010`。该变量只在启动时读取一次,修改后需重启 dev server / 重新构建。
 
+## 环境 profile
+
+测试和生产使用不同的本地环境文件（真实文件已被 `.gitignore` 忽略）：
+
+```powershell
+Copy-Item .env.test.example .env.test
+Copy-Item .env.production.example .env.production
+```
+
+测试运行 `yarn dev:test`，生产运行 `yarn build:production` 后使用 `yarn start:production`。不要提交真实环境文件或 API key。
+
 ## V1.6 身份与账号体验
 
 身份只有 `ANONYMOUS`、`REGISTERED`、`ADMIN`。普通用户使用 username/password：
