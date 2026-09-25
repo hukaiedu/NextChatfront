@@ -170,6 +170,7 @@ const en: LocaleType = {
       Clear: "Clear Context",
       Settings: "Settings",
       UploadImage: "Upload Images",
+      UploadFile: "Add files",
     },
     Rename: "Rename Chat",
     Typing: "Typing…",
@@ -179,6 +180,12 @@ const en: LocaleType = {
     ImageTotalExceeded: "Total image size exceeds the 10MB limit",
     ImageReadFailed: "Failed to read the image",
     ImagePreparing: "Preparing image…",
+    FileTypeUnsupported:
+      "This file type is not supported. Choose an image, PDF, or Word file.",
+    RemoveFile: "Remove file",
+    DocumentsPending:
+      "Files are staged locally and can be sent once backend support is connected.",
+    DropFilesHint: "Drop images or files to attach",
     ImageHistory: (count: number) =>
       count > 1 ? `Historical images · ${count}` : "Historical image",
     ImageHistoryHint: "The original image is no longer available",

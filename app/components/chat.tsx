@@ -1,4 +1,5 @@
 import { useDebouncedCallback } from "use-debounce";
+import { nanoid } from "nanoid";
 import React, {
   Fragment,
   RefObject,
@@ -29,8 +30,8 @@ import AutoIcon from "../icons/auto.svg";
 import BottomIcon from "../icons/bottom.svg";
 import ShortcutkeyIcon from "../icons/shortcutkey.svg";
 import ArchiveIcon from "../icons/archive.svg";
+import AddIcon from "../icons/add.svg";
 import ImageIcon from "../icons/image.svg";
-import DeleteIcon from "../icons/clear.svg";
 import {
   ChatMessage,
   getDefaultTopic,
@@ -468,18 +469,43 @@ type AttachmentOwner = {
   wasDraft: boolean;
 };
 
+type PendingDocument = {
+  id: string;
+  file: File;
+  extension: "PDF" | "DOC" | "DOCX";
+};
+
 /** I3:outer Chat → ChatInner 的附件 composer props 组(H1;gate/epoch 全在 outer 实现) */
 export type AttachmentController = {
   pendingImages: PendingImage[];
+  pendingDocuments: PendingDocument[];
   isPreparingImages: boolean;
   isSubmittingMessage: boolean;
   addFiles: (files: FileList | File[]) => void;
   removeAt: (id: string) => void;
+  removeDocument: (id: string) => void;
   submit: (text: string) => void;
 };
 
 /** I3-B:I3-A 支持集的派生视图(唯一真值仍是 utils/attachment.ts ATTACHMENT_ACCEPT) */
 const ACCEPTED_ATTACHMENT_MIME_TYPES = new Set(ATTACHMENT_ACCEPT.split(","));
+const DOCUMENT_ACCEPT =
+  ".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const FILE_PICKER_ACCEPT = `${ATTACHMENT_ACCEPT},${DOCUMENT_ACCEPT}`;
+
+function getDocumentExtension(file: File): PendingDocument["extension"] | null {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "pdf") return "PDF";
+  if (extension === "doc") return "DOC";
+  if (extension === "docx") return "DOCX";
+  return null;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 /** I3-B:clipboard File 允许空名,空名补名表(仅 I3-A 支持 MIME;F9 名实相符) */
 const PASTE_IMAGE_NAME_BY_MIME = new Map<string, string>([
@@ -527,6 +553,7 @@ function ChatInner(props: { attachment: AttachmentController }) {
   const fontFamily = config.fontFamily;
 
   const [showExport, setShowExport] = useState(false);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -650,11 +677,42 @@ function ChatInner(props: { attachment: AttachmentController }) {
     attachment.addFiles(files);
   };
 
+  const onFilesDragEnter = (event: React.DragEvent<HTMLLabelElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    if (!attachmentDisabled) setIsDraggingFiles(true);
+  };
+
+  const onFilesDragOver = (event: React.DragEvent<HTMLLabelElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = attachmentDisabled ? "none" : "copy";
+  };
+
+  const onFilesDragLeave = (event: React.DragEvent<HTMLLabelElement>) => {
+    if (
+      event.relatedTarget instanceof Node &&
+      event.currentTarget.contains(event.relatedTarget)
+    ) {
+      return;
+    }
+    setIsDraggingFiles(false);
+  };
+
+  const onFilesDrop = (event: React.DragEvent<HTMLLabelElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    setIsDraggingFiles(false);
+    if (attachmentDisabled || event.dataTransfer.files.length === 0) return;
+    attachment.addFiles(event.dataTransfer.files);
+  };
+
   const doSubmit = (userInput: string) => {
     // I3/R23:准备中 / POST 在途守卫(真拦截在 outer submit 的 submittingRef);
     // 联合判据:文本 ∨ 附件至少一个(纯图 content="")
     if (attachment.isPreparingImages) return;
     if (attachment.isSubmittingMessage) return;
+    if (attachment.pendingDocuments.length > 0) return;
     if (userInput.trim() === "" && attachment.pendingImages.length === 0)
       return;
     // §39:command 仅在文本非空时尝试(纯图不得进入 command parser,现序不变)
@@ -1399,7 +1457,7 @@ function ChatInner(props: { attachment: AttachmentController }) {
                 type="file"
                 hidden
                 multiple
-                accept={ATTACHMENT_ACCEPT}
+                accept={FILE_PICKER_ACCEPT}
                 onChange={(e) => {
                   if (e.currentTarget.files?.length) {
                     attachment.addFiles(e.currentTarget.files);
@@ -1408,8 +1466,15 @@ function ChatInner(props: { attachment: AttachmentController }) {
                 }}
               />
               <label
-                className={styles["chat-input-panel-inner"]}
+                className={clsx(styles["chat-input-panel-inner"], {
+                  [styles["chat-input-panel-inner-drop-active"]]:
+                    isDraggingFiles,
+                })}
                 htmlFor="chat-input"
+                onDragEnter={onFilesDragEnter}
+                onDragOver={onFilesDragOver}
+                onDragLeave={onFilesDragLeave}
+                onDrop={onFilesDrop}
               >
                 {attachment.pendingImages.length > 0 && (
                   <div className={styles["attach-images"]}>
@@ -1420,23 +1485,62 @@ function ChatInner(props: { attachment: AttachmentController }) {
                         style={{ backgroundImage: `url(${image.dataUrl})` }}
                         onClick={() => showImageModal(image.dataUrl)}
                       >
-                        <div className={styles["attach-image-mask"]}>
-                          <DeleteIcon
-                            className={styles["delete-image"]}
-                            role="button"
-                            aria-label={Locale.Chat.Actions.Delete}
-                            aria-disabled={
-                              attachment.isSubmittingMessage || undefined
-                            }
-                            onClick={(e: React.MouseEvent) => {
-                              e.stopPropagation();
-                              if (attachment.isSubmittingMessage) return;
-                              attachment.removeAt(image.id);
-                            }}
-                          />
-                        </div>
+                        <button
+                          className={styles["attach-image-remove"]}
+                          type="button"
+                          aria-label={`${Locale.Chat.RemoveFile}: ${image.name}`}
+                          title={Locale.Chat.RemoveFile}
+                          disabled={attachment.isSubmittingMessage}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            attachment.removeAt(image.id);
+                          }}
+                        >
+                          ×
+                        </button>
                       </div>
                     ))}
+                  </div>
+                )}
+                {attachment.pendingDocuments.length > 0 && (
+                  <div className={styles["attach-documents"]}>
+                    {attachment.pendingDocuments.map(
+                      ({ id, file, extension }) => (
+                        <div className={styles["attach-document"]} key={id}>
+                          <span className={styles["attach-document-type"]}>
+                            {extension}
+                          </span>
+                          <span className={styles["attach-document-meta"]}>
+                            <span
+                              className={styles["attach-document-name"]}
+                              title={file.name}
+                            >
+                              {file.name}
+                            </span>
+                            <span className={styles["attach-document-size"]}>
+                              {formatFileSize(file.size)}
+                            </span>
+                          </span>
+                          <button
+                            className={styles["attach-document-remove"]}
+                            type="button"
+                            aria-label={`${Locale.Chat.RemoveFile}: ${file.name}`}
+                            title={Locale.Chat.RemoveFile}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              attachment.removeDocument(id);
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ),
+                    )}
+                    <p className={styles["attach-documents-hint"]}>
+                      {Locale.Chat.DocumentsPending}
+                    </p>
                   </div>
                 )}
                 <textarea
@@ -1466,21 +1570,23 @@ function ChatInner(props: { attachment: AttachmentController }) {
                   data-composer-toolbar="true"
                 >
                   <div className={styles["chat-input-toolbar-left"]}>
-                    <ModelSelectorButton dropUp />
-                  </div>
-                  <div className={styles["chat-input-toolbar-right"]}>
-                    <ChatAction
-                      onClick={() => {
-                        if (attachmentDisabled) return;
+                    <button
+                      className={styles["attach-add-button"]}
+                      type="button"
+                      aria-label={Locale.Chat.InputActions.UploadFile}
+                      title={Locale.Chat.InputActions.UploadFile}
+                      disabled={attachmentDisabled}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
                         fileInputRef.current?.click();
                       }}
-                      text={
-                        attachment.isPreparingImages
-                          ? Locale.Chat.ImagePreparing
-                          : Locale.Chat.InputActions.UploadImage
-                      }
-                      icon={<ImageIcon />}
-                    />
+                    >
+                      <AddIcon aria-hidden="true" />
+                    </button>
+                  </div>
+                  <div className={styles["chat-input-toolbar-right"]}>
+                    <ModelSelectorButton dropUp />
                     {session.pendingRequestId ? (
                       <IconButton
                         icon={<PauseIcon />}
@@ -1498,13 +1604,19 @@ function ChatInner(props: { attachment: AttachmentController }) {
                         type="primary"
                         disabled={
                           attachment.isPreparingImages ||
-                          attachment.isSubmittingMessage
+                          attachment.isSubmittingMessage ||
+                          attachment.pendingDocuments.length > 0
                         }
                         onClick={() => doSubmit(userInput)}
                       />
                     )}
                   </div>
                 </div>
+                {isDraggingFiles && (
+                  <div className={styles["chat-input-drop-hint"]}>
+                    {Locale.Chat.DropFilesHint}
+                  </div>
+                )}
               </label>
             </div>
           </div>
@@ -1534,6 +1646,9 @@ export function Chat() {
   const session = chatStore.currentSession();
 
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [pendingDocuments, setPendingDocuments] = useState<PendingDocument[]>(
+    [],
+  );
   const [isPreparingImages, setIsPreparingImages] = useState(false);
   const [isSubmittingMessage, setIsSubmittingMessage] = useState(false);
   const attachmentEpochRef = useRef(0);
@@ -1563,6 +1678,7 @@ export function Chat() {
 
     attachmentEpochRef.current += 1;
     setPendingImages([]);
+    setPendingDocuments([]);
     setIsPreparingImages(false);
     setIsSubmittingMessage(false);
     submittingRef.current = false;
@@ -1581,6 +1697,27 @@ export function Chat() {
       if (isPreparingImages || submittingRef.current) return;
       const list = Array.from(files);
       if (list.length === 0) return;
+      const imageFiles: File[] = [];
+      const documents: PendingDocument[] = [];
+      let hasUnsupportedFile = false;
+      for (const file of list) {
+        const extension = getDocumentExtension(file);
+        if (extension) {
+          documents.push({ id: nanoid(), file, extension });
+        } else if (
+          ACCEPTED_ATTACHMENT_MIME_TYPES.has(file.type.toLowerCase())
+        ) {
+          imageFiles.push(file);
+        } else {
+          hasUnsupportedFile = true;
+        }
+      }
+      if (documents.length > 0) {
+        setPendingDocuments((prev) => [...prev, ...documents]);
+      }
+      if (hasUnsupportedFile) showToast(Locale.Chat.FileTypeUnsupported);
+      if (imageFiles.length === 0) return;
+
       const capturedEpoch = attachmentEpochRef.current;
       const baseCount = pendingImages.length;
       const baseTotal = pendingImages.reduce((sum, im) => sum + im.bytes, 0);
@@ -1588,8 +1725,8 @@ export function Chat() {
       let addedBytes = 0;
       setIsPreparingImages(true);
       try {
-        // 串行 for…of:严格 FileList 顺序(= 后端 digest 顺序),禁并行 canvas
-        for (const file of list) {
+        // 串行处理图片,避免并行 canvas 占用过多内存。
+        for (const file of imageFiles) {
           try {
             const image = await prepareAttachment(file);
             if (capturedEpoch !== attachmentEpochRef.current) return;
@@ -1631,9 +1768,16 @@ export function Chat() {
     setPendingImages((prev) => prev.filter((image) => image.id !== id));
   }, []);
 
+  const removeDocument = useCallback((id: string) => {
+    setPendingDocuments((prev) =>
+      prev.filter((document) => document.id !== id),
+    );
+  }, []);
+
   const submit = useCallback(
     (text: string) => {
       if (isPreparingImages || submittingRef.current) return;
+      if (pendingDocuments.length > 0) return;
       if (text.trim() === "" && pendingImages.length === 0) return;
       const snapshot = pendingImages;
       const epochAtSend = attachmentEpochRef.current;
@@ -1652,7 +1796,7 @@ export function Chat() {
           setIsSubmittingMessage(false); // → session.pendingRequestId 接管 Stop
         });
     },
-    [chatStore, isPreparingImages, pendingImages],
+    [chatStore, isPreparingImages, pendingDocuments.length, pendingImages],
   );
 
   return (
@@ -1660,10 +1804,12 @@ export function Chat() {
       key={session.id}
       attachment={{
         pendingImages,
+        pendingDocuments,
         isPreparingImages,
         isSubmittingMessage,
         addFiles,
         removeAt,
+        removeDocument,
         submit,
       }}
     ></ChatInner>

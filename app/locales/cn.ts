@@ -164,6 +164,7 @@ const cn = {
       Clear: "清除聊天",
       Settings: "对话设置",
       UploadImage: "上传图片",
+      UploadFile: "添加文件",
     },
     Rename: "重命名对话",
     Typing: "正在输入…",
@@ -173,6 +174,10 @@ const cn = {
     ImageTotalExceeded: "图片总大小超限(上限 10MB)",
     ImageReadFailed: "无法读取该图片",
     ImagePreparing: "图片处理中…",
+    FileTypeUnsupported: "暂不支持此文件类型，请选择图片、PDF 或 Word 文件",
+    RemoveFile: "移除文件",
+    DocumentsPending: "文件已暂存，后端接入后即可随消息发送。",
+    DropFilesHint: "松开以上传图片或文件",
     ImageHistory: (count: number) =>
       count > 1 ? `历史图片 · ${count} 张` : "历史图片",
     ImageHistoryHint: "原图已不可恢复",

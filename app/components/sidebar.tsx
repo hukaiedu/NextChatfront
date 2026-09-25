@@ -9,7 +9,6 @@ import AddIcon from "../icons/add.svg";
 import DeleteIcon from "../icons/delete.svg";
 import MenuIcon from "../icons/menu.svg";
 import DragIcon from "../icons/drag.svg";
-import DiscoveryIcon from "../icons/discovery.svg";
 import ArchiveIcon from "../icons/archive.svg";
 
 import Locale from "../locales";
@@ -29,15 +28,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { useRouter } from "next/navigation";
 import { isIOS, useMobileScreen } from "../utils";
 import dynamic from "next/dynamic";
-import { Selector, showConfirm } from "./ui-lib";
+import { showConfirm } from "./ui-lib";
 import clsx from "clsx";
-import { isMcpEnabled } from "../mcp/actions";
-
-const DISCOVERY = [
-  { name: Locale.Mask.Name, path: Path.Masks },
-  { name: Locale.Plugin.Name, path: Path.Plugins },
-  { name: Locale.SearchChat.Page.Title, path: Path.SearchChat },
-];
 
 const ChatList = dynamic(async () => (await import("./chat-list")).ChatList, {
   loading: () => null,
@@ -287,24 +279,12 @@ function SideBarIdentity() {
 export function SideBar(props: { className?: string }) {
   useHotKey();
   const { onDragStart, toggleSideBar, shouldNarrow } = useDragSideBar();
-  const [showDiscoverySelector, setshowDiscoverySelector] = useState(false);
   const navigate = useNavigate();
   const chatStore = useChatStore();
-  const [mcpEnabled, setMcpEnabled] = useState(false);
   const listStatusLabel =
     chatStore.listStatus === "ACTIVE"
       ? Locale.Home.ShowArchived
       : Locale.Home.ShowActive;
-
-  useEffect(() => {
-    // 检查 MCP 是否启用
-    const checkMcpStatus = async () => {
-      const enabled = await isMcpEnabled();
-      setMcpEnabled(enabled);
-      console.log("[SideBar] MCP enabled:", enabled);
-    };
-    checkMcpStatus();
-  }, []);
 
   return (
     <SideBarContainer
@@ -334,34 +314,6 @@ export function SideBar(props: { className?: string }) {
             navigate(Path.Chat);
           }}
         />
-        <div className={styles["sidebar-header-bar"]}>
-          <IconButton
-            icon={<DiscoveryIcon />}
-            text={shouldNarrow ? undefined : Locale.Discovery.Name}
-            className={styles["sidebar-bar-button"]}
-            onClick={() => setshowDiscoverySelector(true)}
-            shadow
-          />
-        </div>
-        {showDiscoverySelector && (
-          <Selector
-            items={[
-              ...DISCOVERY.map((item) => {
-                return {
-                  title: item.name,
-                  value: item.path,
-                };
-              }),
-              ...(mcpEnabled
-                ? [{ title: Locale.Mcp.Name, value: Path.McpMarket }]
-                : []),
-            ]}
-            onClose={() => setshowDiscoverySelector(false)}
-            onSelection={(s) => {
-              navigate(s[0], { state: { fromHome: true } });
-            }}
-          />
-        )}
       </SideBarHeader>
       <SideBarBody
         onClick={(e) => {
