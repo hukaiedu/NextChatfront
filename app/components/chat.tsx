@@ -33,7 +33,6 @@ import ImageIcon from "../icons/image.svg";
 import DeleteIcon from "../icons/clear.svg";
 import {
   ChatMessage,
-  createMessage,
   getDefaultTopic,
   errorTextForCode,
   SubmitKey,
@@ -519,7 +518,7 @@ function normalizeClipboardImageNames(files: File[]): File[] {
 
 function ChatInner(props: { attachment: AttachmentController }) {
   const attachment = props.attachment;
-  type RenderMessage = ChatMessage & { preview?: boolean };
+  type RenderMessage = ChatMessage;
 
   const chatStore = useChatStore();
   const session = chatStore.currentSession();
@@ -712,21 +711,7 @@ function ChatInner(props: { attachment: AttachmentController }) {
   };
   // 历史消息完全来自后端,不再注入本地 context 与 BOT_HELLO 占位:
   // 空会话就是空的,首条回答由后端建 Conversation 后才出现。
-  const renderMessages = useMemo(() => {
-    return (session.messages as RenderMessage[]).concat(
-      userInput.length > 0 && config.sendPreviewBubble
-        ? [
-            {
-              ...createMessage({
-                role: "user",
-                content: userInput,
-              }),
-              preview: true,
-            },
-          ]
-        : [],
-    );
-  }, [config.sendPreviewBubble, session.messages, userInput]);
+  const renderMessages = session.messages as RenderMessage[];
 
   const [msgRenderIndex, _setMsgRenderIndex] = useState(
     Math.max(0, renderMessages.length - CHAT_PAGE_SIZE),
@@ -887,7 +872,7 @@ function ChatInner(props: { attachment: AttachmentController }) {
       renderMessages.length - CHAT_PAGE_SIZE,
     );
     if (msgRenderIndex !== latestWindowIndex) {
-      // 对齐期间窗口又漂移(如 preview 气泡)→ 以当前 length 再对齐一次
+      // 对齐期间窗口又漂移 → 以当前 length 再对齐一次
       setMsgRenderIndex(latestWindowIndex);
       return;
     }
@@ -1249,9 +1234,7 @@ function ChatInner(props: { attachment: AttachmentController }) {
                 // I3.5:历史图片份数(旧后端缺省 0);真实 image_url 存在时优先渲染真实图片
                 const attachmentCount = message.attachmentCount ?? 0;
                 const showActions =
-                  i > 0 &&
-                  !(message.preview || message.content.length === 0) &&
-                  !message.streaming;
+                  i > 0 && message.content.length !== 0 && !message.streaming;
 
                 return (
                   <Fragment key={message.id}>
@@ -1311,7 +1294,7 @@ function ChatInner(props: { attachment: AttachmentController }) {
                             key={message.streaming ? "loading" : "done"}
                             content={getMessageTextContent(message)}
                             loading={
-                              (message.preview || message.streaming) &&
+                              message.streaming &&
                               message.content.length === 0 &&
                               !isUser
                             }

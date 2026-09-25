@@ -9,7 +9,7 @@ import Delete from "../icons/close.svg";
 import Arrow from "../icons/arrow.svg";
 import Logo from "../icons/logo.svg";
 import { useMobileScreen } from "@/app/utils";
-import BotIcon from "../icons/bot.svg";
+import { PersonChatIcon } from "./personchat-icon";
 import { getClientConfig } from "../config/client";
 import { PasswordInput } from "./ui-lib";
 import LeftIcon from "@/app/icons/left.svg";
@@ -57,7 +57,7 @@ export function AuthPage() {
         ></IconButton>
       </div>
       <div className={clsx("no-dark", styles["auth-logo"])}>
-        <BotIcon />
+        <PersonChatIcon />
       </div>
 
       <div className={styles["auth-title"]}>{Locale.Auth.Title}</div>
