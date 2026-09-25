@@ -322,6 +322,10 @@
 
 /* 空白首页:问候语 + Composer 作为一组垂直居中,不引入欢迎卡片 */
 .chat-empty {
+  .chat-header {
+    display: none;
+  }
+
   .chat-body-container {
     justify-content: center;
   }
@@ -346,9 +350,9 @@
 }
 
 .chat-empty-title {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 600;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
   color: var(--color-text);
 }
 

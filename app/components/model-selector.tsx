@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import DownIcon from "../icons/down.svg";
-import ModelIcon from "../icons/llm-icons/default.svg";
+import { PersonChatIcon } from "./personchat-icon";
 import Locale from "../locales";
 import { useChatStore } from "../store";
 import { IconButton } from "./button";
@@ -144,7 +144,7 @@ export function ModelSelectorButton(props: { dropUp?: boolean }) {
                   handleSelection(item.value);
                 }}
               >
-                <ModelIcon width={20} height={20} />
+                <PersonChatIcon width={24} height={24} />
                 <span className={styles["item-title"]}>{item.title}</span>
                 {item.value === currentValue ? (
                   <span className={styles["item-check"]} />

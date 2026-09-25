@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 
-import BotIcon from "../icons/bot.svg";
+import { PersonChatIcon } from "./personchat-icon";
 import styles from "./auth-layout.module.scss";
 
 interface AuthLayoutProps {
@@ -23,7 +23,7 @@ export function AuthLayout({
       <div className={styles["auth-layout"]}>
         <div className={styles.brand} aria-label="personChat">
           <span className={styles["brand-mark"]} aria-hidden="true">
-            <BotIcon />
+            <PersonChatIcon width={32} height={32} />
           </span>
           <span className={styles["brand-name"]}>personChat</span>
         </div>

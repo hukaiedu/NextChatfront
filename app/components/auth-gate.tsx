@@ -6,6 +6,7 @@ import { AuthStatus, AuthUserType, useAuthStore } from "../store/auth";
 import { useChatStore } from "../store/chat";
 import Locale from "../locales";
 import styles from "./auth-gate.module.scss";
+import { isLocalPreviewMode } from "../config/local-preview";
 
 /**
  * V1.3-C §5/§6:会话引导门(取代 V1.2 的密码门)。
@@ -27,11 +28,13 @@ export function AuthGate(props: { children?: ReactNode }) {
   const refreshIdentity = useAuthStore((state) => state.refreshIdentity);
 
   useEffect(() => {
+    if (isLocalPreviewMode) return;
     // single-flight 在 store 内保证:StrictMode 双 effect 不会发两次 anonymous(§12/§13)
     void bootstrap();
   }, [bootstrap]);
 
   useEffect(() => {
+    if (isLocalPreviewMode) return;
     const onVisible = () => {
       if (document.visibilityState === "visible") {
         refreshIdentity();
@@ -59,6 +62,7 @@ export function AuthGate(props: { children?: ReactNode }) {
     epoch: number;
   } | null>(null);
   useEffect(() => {
+    if (isLocalPreviewMode) return;
     const previous = seenIdentity.current;
     seenIdentity.current = { status, userType, epoch: identityEpoch };
     // 首次登记(含 StrictMode 重挂)不动作:此刻 store 里的数据就属于当前身份
@@ -91,6 +95,10 @@ export function AuthGate(props: { children?: ReactNode }) {
     // lost 时 children 已卸载,回来的那次挂载由 useLoadData 拉 —— 不在此处重复请求
     if (swapped) void useChatStore.getState().bootstrap();
   }, [status, userType, identityEpoch]);
+
+  if (isLocalPreviewMode) {
+    return <>{props.children}</>;
+  }
 
   if (status === "authenticated") {
     return <>{props.children}</>;

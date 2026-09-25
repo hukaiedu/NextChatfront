@@ -5,7 +5,7 @@ require("../polyfill");
 import { useEffect, useState } from "react";
 import styles from "./home.module.scss";
 
-import BotIcon from "../icons/bot.svg";
+import { PersonChatIcon } from "./personchat-icon";
 import LoadingIcon from "../icons/three-dots.svg";
 
 import { getCSSVar, useMobileScreen } from "../utils";
@@ -29,11 +29,12 @@ import { getClientConfig } from "../config/client";
 import { useAccessStore, useChatStore } from "../store";
 import clsx from "clsx";
 import { initializeMcpSystem, isMcpEnabled } from "../mcp/actions";
+import { isLocalPreviewMode } from "../config/local-preview";
 
 export function Loading(props: { noLogo?: boolean }) {
   return (
     <div className={clsx("no-dark", styles["loading-content"])}>
-      {!props.noLogo && <BotIcon />}
+      {!props.noLogo && <PersonChatIcon />}
       <LoadingIcon />
     </div>
   );
@@ -213,6 +214,12 @@ function Screen() {
 
 export function useLoadData() {
   useEffect(() => {
+    if (isLocalPreviewMode) {
+      // Preview mode needs one local draft for the composer, but no server list.
+      const chatStore = useChatStore.getState();
+      if (chatStore.sessions.length === 0) chatStore.newSession();
+      return;
+    }
     // 会话列表来自后端;同时清掉第 7 阶段之前本地存的聊天数据
     void useChatStore.getState().bootstrap();
   }, []);
@@ -224,6 +231,7 @@ export function Home() {
   useHtmlLang();
 
   useEffect(() => {
+    if (isLocalPreviewMode) return;
     console.log("[Config] got config from build time", getClientConfig());
     useAccessStore.getState().fetch();
 
