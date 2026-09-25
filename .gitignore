@@ -87,3 +87,4 @@ Thumbs.db
 !.env.template
 !.env.test.example
 !.env.production.example
+.next-test/
