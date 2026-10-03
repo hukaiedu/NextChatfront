@@ -315,6 +315,7 @@ const en: LocaleType = {
     Update: {
       Version: (x: string) => `Version: ${x}`,
       IsLatest: "Latest version",
+      CheckFailed: "Unable to check for updates. Please try again later.",
       CheckUpdate: "Check Update",
       IsChecking: "Checking update...",
       FoundUpdate: (x: string) => `Found new version: ${x}`,

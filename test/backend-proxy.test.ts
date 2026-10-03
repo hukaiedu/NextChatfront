@@ -37,10 +37,9 @@ describe("runtime backend proxy", () => {
     const { GET } = await import("../app/backend-api/[...path]/route");
     process.env.BACKEND_ORIGIN = "http://real-backend:3010";
 
-    await GET(
-      new Request("http://front.test/backend-api/auth/session?tab=1"),
-      { params: Promise.resolve({ path: ["auth", "session"] }) },
-    );
+    await GET(new Request("http://front.test/backend-api/auth/session?tab=1"), {
+      params: Promise.resolve({ path: ["auth", "session"] }),
+    });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://real-backend:3010/api/auth/session?tab=1",
@@ -48,10 +47,9 @@ describe("runtime backend proxy", () => {
     );
 
     process.env.BACKEND_ORIGIN = "http://another-backend:3010";
-    await GET(
-      new Request("http://front.test/backend-api/auth/session"),
-      { params: Promise.resolve({ path: ["auth", "session"] }) },
-    );
+    await GET(new Request("http://front.test/backend-api/auth/session"), {
+      params: Promise.resolve({ path: ["auth", "session"] }),
+    });
 
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "http://another-backend:3010/api/auth/session",
@@ -93,7 +91,7 @@ describe("runtime backend proxy", () => {
     expect(headers.get("idempotency-key")).toBe("web-test-key");
     expect(headers.get("host")).toBeNull();
     expect(headers.get("x-forwarded-host")).toBeNull();
-    expect(proxyInit?.duplex).toBe("half");
+    expect(proxyInit?.duplex).toBeUndefined();
     expect(await new globalThis.Response(init?.body).text()).toBe(
       JSON.stringify({ content: "hello" }),
     );
@@ -121,10 +119,61 @@ describe("runtime backend proxy", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
-    expect(response.headers.get("cache-control")).toBe("no-cache, no-transform");
+    expect(response.headers.get("cache-control")).toBe(
+      "no-cache, no-transform",
+    );
     expect(response.headers.get("set-cookie")).toContain(
       "personchat_session=next-token",
     );
     expect(await response.text()).toContain("event: connected");
+  });
+
+  test.each([401, 403, 429, 503])(
+    "preserves backend error status %s and error details",
+    async (status) => {
+      const body = {
+        error: {
+          code: "AUTH_INVALID_CREDENTIALS",
+          message: "Invalid username or password",
+        },
+      };
+      const fetchMock = jest
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(JSON.stringify(body), {
+            status,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      global.fetch = fetchMock;
+      const { POST } = await import("../app/backend-api/[...path]/route");
+      const response = await POST(
+        new Request("http://front.test/backend-api/auth/user/login", {
+          method: "POST",
+          body: JSON.stringify({ username: "test", password: "wrong" }),
+        }),
+        { params: Promise.resolve({ path: ["auth", "user", "login"] }) },
+      );
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual(body);
+      expect(
+        Object.prototype.toString.call(fetchMock.mock.calls[0]?.[1]?.body),
+      ).toBe("[object ArrayBuffer]");
+    },
+  );
+
+  test("preserves an empty logout response", async () => {
+    global.fetch = jest
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const { POST } = await import("../app/backend-api/[...path]/route");
+    const response = await POST(
+      new Request("http://front.test/backend-api/auth/logout", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ path: ["auth", "logout"] }) },
+    );
+    expect(response.status).toBe(204);
+    expect(await response.text()).toBe("");
   });
 });

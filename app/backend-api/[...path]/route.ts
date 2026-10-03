@@ -132,7 +132,7 @@ async function proxy(
     return jsonResponse({ error: "Backend proxy is not configured" }, 500);
   }
 
-  const fetchInit: RequestInit & { duplex?: "half" } = {
+  const fetchInit: RequestInit = {
     method: request.method,
     headers: copyRequestHeaders(request),
     redirect: "manual",
@@ -141,8 +141,8 @@ async function proxy(
   };
 
   if (request.body && request.method !== "GET" && request.method !== "HEAD") {
-    fetchInit.body = request.body;
-    fetchInit.duplex = "half";
+    // A replayable body also lets fetch return early authentication failures.
+    fetchInit.body = await request.arrayBuffer();
   }
 
   try {
