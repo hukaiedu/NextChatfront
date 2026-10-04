@@ -851,6 +851,20 @@ const en: LocaleType = {
       Actions: "Provider actions",
       ActionsTip:
         "Open starts and focuses the provider page; Restart closes it and relaunches with the same profile",
+      Check: "Check sign-in",
+      CheckTip:
+        "This contacts Gemini for the model catalog and may refresh the temporary login cache. It does not send a chat message or verify generation.",
+      CheckResult: {
+        NOT_CHECKED: "Not checked",
+        MODEL_CATALOG_OK: "Model catalog request succeeded",
+        LOGIN_REQUIRED: "Sign-in required",
+        BUSY: "Service is busy; try again shortly",
+        NOT_READY: "Provider is not ready",
+        CHECK_FAILED: "Check failed",
+      },
+      CheckDetails: (count: number, time: string) =>
+        `${count} models · Checked ${time}`,
+      CheckFailureCode: (code: string) => `Diagnostic code: ${code}`,
       Open: "Open provider",
       OpenSuccess: "Provider page opened",
       Restart: "Restart provider",

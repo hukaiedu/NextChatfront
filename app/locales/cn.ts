@@ -829,6 +829,20 @@ const cn = {
       Actions: "Provider 操作",
       ActionsTip:
         "打开会启动并聚焦 Provider 页面；重启会关闭后按同一 Profile 重新启动",
+      Check: "检查登录态",
+      CheckTip:
+        "会访问 Gemini 获取模型目录，可能刷新临时登录缓存；不会发送聊天消息。检查通过不代表生成链路已验证。",
+      CheckResult: {
+        NOT_CHECKED: "尚未检查",
+        MODEL_CATALOG_OK: "模型目录请求成功",
+        LOGIN_REQUIRED: "需要重新登录",
+        BUSY: "服务正忙，请稍后重试",
+        NOT_READY: "Provider 尚未就绪",
+        CHECK_FAILED: "检查失败",
+      },
+      CheckDetails: (count: number, time: string) =>
+        `可用模型 ${count} 个 · 检查时间 ${time}`,
+      CheckFailureCode: (code: string) => `诊断码：${code}`,
       Open: "打开 Provider",
       OpenSuccess: "已打开 Provider 页面",
       Restart: "重启 Provider",

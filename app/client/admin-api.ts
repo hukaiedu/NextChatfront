@@ -79,10 +79,32 @@ export interface AdminProviderStatus {
   /** 后端回显的 Provider 标识(GEMINI_WEB),仅 Admin 面可见 */
   provider: string;
   status: AdminProviderState;
+  authCheck?: AdminProviderAuthCheck;
+}
+
+export interface AdminProviderAuthCheck {
+  result:
+    | "NOT_CHECKED"
+    | "MODEL_CATALOG_OK"
+    | "LOGIN_REQUIRED"
+    | "BUSY"
+    | "NOT_READY"
+    | "CHECK_FAILED";
+  scope: "MODEL_CATALOG_ONLY";
+  checkedAt: string | null;
+  modelCount: number | null;
+  failureCode: string | null;
 }
 
 export function getAdminProviderStatus(): Promise<AdminProviderStatus> {
   return callBackend<AdminProviderStatus>("/admin/provider/status");
+}
+
+/** POST /api/admin/provider/check:检查登录态能否完成模型目录请求，不发送聊天消息。 */
+export function checkAdminProvider(): Promise<AdminProviderStatus> {
+  return callBackend<AdminProviderStatus>("/admin/provider/check", {
+    method: "POST",
+  });
 }
 
 /** POST /api/admin/provider/open:启动 Browser Manager 并打开/聚焦 Provider 页面 */
