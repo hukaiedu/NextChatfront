@@ -753,7 +753,7 @@ const en: LocaleType = {
   Browser: {
     Title: "Backend Browser",
     SubTitle:
-      "The browser instance personChat Backend drives to reach Gemini Web",
+      "Used to sign in or restore Gemini authentication; saved authentication remains usable after closing",
     State: {
       RUNNING: "Running",
       STARTING: "Starting",
@@ -804,6 +804,11 @@ const en: LocaleType = {
     Empty: "—",
   },
   AdminConsole: {
+    LoginDescription: "Manage Gemini authentication and service status.",
+    PasswordLabel: "Admin password",
+    Submitting: "Signing in…",
+    LoginProbing: "Checking your session…",
+    BrowserDetails: "Browser details (troubleshooting)",
     Title: "Admin console",
     LoginTitle: "Admin sign-in",
     PasswordPlaceholder: "Enter admin password",
@@ -837,8 +842,9 @@ const en: LocaleType = {
       RevokeAllFailed: "Failed to revoke sessions, please try again",
     },
     Provider: {
-      Title: "Provider status",
-      SubTitle: "How ready the provider page behind the backend is",
+      Title: "Gemini sign-in",
+      SubTitle:
+        "Gemini authentication used by the backend; check results appear below",
       State: {
         STOPPED: "Stopped",
         STARTING: "Starting",
@@ -848,7 +854,7 @@ const en: LocaleType = {
         ERROR: "Error",
       },
       Unknown: "Unknown",
-      Actions: "Provider actions",
+      Actions: "Sign-in and recovery",
       ActionsTip:
         "Open starts and focuses the provider page; Restart closes it and relaunches with the same profile",
       Check: "Check sign-in",
@@ -864,9 +870,10 @@ const en: LocaleType = {
       },
       CheckDetails: (count: number, time: string) =>
         `${count} models · Checked ${time}`,
+      CheckTime: (time: string) => `Checked ${time}`,
       CheckFailureCode: (code: string) => `Diagnostic code: ${code}`,
-      Open: "Open provider",
-      OpenSuccess: "Provider page opened",
+      Open: "Open sign-in window",
+      OpenSuccess: "Gemini sign-in window opened",
       Restart: "Restart provider",
       RestartConfirm:
         "Restart the provider? The current page closes and in-flight generations fail.",

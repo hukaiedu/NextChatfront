@@ -19,6 +19,7 @@ import {
   getAuthSession,
 } from "../client/backend-api";
 import { useAuthStore } from "../store/auth";
+import { useBrowserStore } from "../store/browser";
 import { AdminBrowserPanel } from "../components/browser-status";
 import { IconButton } from "../components/button";
 import { List, ListItem, showConfirm, showToast } from "../components/ui-lib";
@@ -165,9 +166,12 @@ function AdminConsolePage() {
             </ListItem>
           </List>
 
-          <AdminBrowserPanel />
-
           <AdminProviderSection />
+
+          <details className={styles.browserDetails}>
+            <summary>{Locale.AdminConsole.BrowserDetails}</summary>
+            <AdminBrowserPanel />
+          </details>
 
           <List>
             <ListItem
@@ -209,9 +213,9 @@ function AdminConsolePage() {
 const PROVIDER_STATE_LABEL: Record<AdminProviderState, string> = {
   STOPPED: Locale.AdminConsole.Provider.State.STOPPED,
   STARTING: Locale.AdminConsole.Provider.State.STARTING,
-  LOGIN_REQUIRED: Locale.AdminConsole.Provider.State.LOGIN_REQUIRED,
-  READY: Locale.AdminConsole.Provider.State.READY,
-  BUSY: Locale.AdminConsole.Provider.State.BUSY,
+  LOGIN_REQUIRED: Locale.Browser.LoggedIn.No,
+  READY: Locale.Browser.LoggedIn.Yes,
+  BUSY: `${Locale.Browser.LoggedIn.Yes} · ${Locale.AdminConsole.Provider.State.BUSY}`,
   ERROR: Locale.AdminConsole.Provider.State.ERROR,
 };
 
@@ -229,19 +233,20 @@ function providerAuthCheckText(status: AdminProviderStatus | null): string {
 
 /**
  * Provider 运维面板:状态 + 打开 + 重启(canonical /admin/provider/*)。
- * 状态是服务端事实,进面板读一次,操作后直接用后端返回值刷新,不额外轮询
- * (浏览器面板已有自己的轮询,两个面板不叠两份定时器)。
+ * 与浏览器面板共享刷新节奏，操作后回读浏览器快照，保持登录态同步。
  */
 function AdminProviderSection() {
+  const browserFetchedAt = useBrowserStore((state) => state.fetchedAt);
   const [status, setStatus] = useState<AdminProviderStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
 
   useEffect(() => {
+    if (busyRef.current || browserFetchedAt === null) return;
     let alive = true;
     void getAdminProviderStatus()
       .then((next) => {
-        if (alive) setStatus(next);
+        if (alive && !busyRef.current) setStatus(next);
       })
       .catch((error) => {
         if (alive) showToast(providerErrorText(error));
@@ -249,7 +254,7 @@ function AdminProviderSection() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [browserFetchedAt]);
 
   const run = async (
     call: () => Promise<AdminProviderStatus>,
@@ -260,6 +265,7 @@ function AdminProviderSection() {
     setBusy(true);
     try {
       setStatus(await call());
+      await useBrowserStore.getState().refresh(true);
       if (successText) showToast(successText);
     } catch (error) {
       console.error("[Admin] Provider 操作失败", error);
@@ -293,6 +299,7 @@ function AdminProviderSection() {
         </div>
       </ListItem>
       <ListItem
+        className={styles.providerRow}
         title={Locale.AdminConsole.Provider.Check}
         subTitle={Locale.AdminConsole.Provider.CheckTip}
       >
@@ -300,15 +307,18 @@ function AdminProviderSection() {
           <div role="status" aria-live="polite" className={styles.value}>
             {providerAuthCheckText(status)}
           </div>
-          {status?.authCheck?.checkedAt &&
-            status.authCheck.modelCount !== null && (
-              <div className={styles.value}>
-                {Locale.AdminConsole.Provider.CheckDetails(
-                  status.authCheck.modelCount,
-                  new Date(status.authCheck.checkedAt).toLocaleString(),
-                )}
-              </div>
-            )}
+          {status?.authCheck?.checkedAt && (
+            <div className={styles.value}>
+              {status.authCheck.modelCount !== null
+                ? Locale.AdminConsole.Provider.CheckDetails(
+                    status.authCheck.modelCount,
+                    new Date(status.authCheck.checkedAt).toLocaleString(),
+                  )
+                : Locale.AdminConsole.Provider.CheckTime(
+                    new Date(status.authCheck.checkedAt).toLocaleString(),
+                  )}
+            </div>
+          )}
           {status?.authCheck?.failureCode && (
             <div className={styles.value}>
               {Locale.AdminConsole.Provider.CheckFailureCode(
@@ -326,6 +336,7 @@ function AdminProviderSection() {
         </div>
       </ListItem>
       <ListItem
+        className={styles.providerRow}
         title={Locale.AdminConsole.Provider.Actions}
         subTitle={Locale.AdminConsole.Provider.ActionsTip}
       >
