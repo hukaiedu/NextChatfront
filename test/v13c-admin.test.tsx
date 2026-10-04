@@ -36,6 +36,7 @@ const LOGIN = "/backend-api/auth/login";
 const LOGOUT = "/backend-api/auth/logout";
 const BROWSER_STATUS = "/backend-api/admin/browser/status";
 const PROVIDER_STATUS = "/backend-api/admin/provider/status";
+const PROVIDER_CHECK = "/backend-api/admin/provider/check";
 const PROVIDER_OPEN = "/backend-api/admin/provider/open";
 const PROVIDER_RESTART = "/backend-api/admin/provider/restart";
 const REVOKE_ALL = "/backend-api/admin/sessions/revoke-all";
@@ -392,6 +393,39 @@ describe("C-ADMIN 登录状态收口", () => {
 });
 
 describe("C-ADMIN Provider 运维(FIX-01 补齐)", () => {
+  test("C-ADMIN-12 手动检查登录态:只展示模型目录检查结果并走 Admin 接口", async () => {
+    adminSurface((url, method) =>
+      url === PROVIDER_CHECK && method === "POST"
+        ? reply(200, {
+            data: {
+              ...providerSnapshot(),
+              authCheck: {
+                result: "MODEL_CATALOG_OK",
+                scope: "MODEL_CATALOG_ONLY",
+                checkedAt: STAMP,
+                modelCount: 3,
+                failureCode: null,
+              },
+            },
+          })
+        : undefined,
+    );
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    expect(screen.getByText(Locale.AdminConsole.Provider.CheckTip)).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: Locale.AdminConsole.Provider.Check }),
+    );
+    await act(settle);
+
+    expect(callsTo(PROVIDER_CHECK, "POST")).toHaveLength(1);
+    expect(screen.getByText(Locale.AdminConsole.Provider.CheckResult.MODEL_CATALOG_OK)).toBeTruthy();
+    expect(screen.getByText(Locale.AdminConsole.Provider.CheckDetails(3, new Date(STAMP).toLocaleString()))).toBeTruthy();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
   test("C-ADMIN-09 打开 Provider:无二次确认,只发 canonical POST /admin/provider/open", async () => {
     adminSurface((url, method) =>
       url === PROVIDER_OPEN && method === "POST"

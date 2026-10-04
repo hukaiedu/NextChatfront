@@ -7,6 +7,7 @@ import ReloadIcon from "../icons/reload.svg";
 import {
   AdminProviderState,
   AdminProviderStatus,
+  checkAdminProvider,
   getAdminProviderStatus,
   openAdminProvider,
   restartAdminProvider,
@@ -221,6 +222,11 @@ function providerErrorText(error: unknown): string {
     : String(error);
 }
 
+function providerAuthCheckText(status: AdminProviderStatus | null): string {
+  const result = status?.authCheck?.result ?? "NOT_CHECKED";
+  return Locale.AdminConsole.Provider.CheckResult[result];
+}
+
 /**
  * Provider 运维面板:状态 + 打开 + 重启(canonical /admin/provider/*)。
  * 状态是服务端事实,进面板读一次,操作后直接用后端返回值刷新,不额外轮询
@@ -284,6 +290,39 @@ function AdminProviderSection() {
           {status
             ? PROVIDER_STATE_LABEL[status.status]
             : Locale.AdminConsole.Provider.Unknown}
+        </div>
+      </ListItem>
+      <ListItem
+        title={Locale.AdminConsole.Provider.Check}
+        subTitle={Locale.AdminConsole.Provider.CheckTip}
+      >
+        <div className={styles.diagnostic}>
+          <div role="status" aria-live="polite" className={styles.value}>
+            {providerAuthCheckText(status)}
+          </div>
+          {status?.authCheck?.checkedAt &&
+            status.authCheck.modelCount !== null && (
+              <div className={styles.value}>
+                {Locale.AdminConsole.Provider.CheckDetails(
+                  status.authCheck.modelCount,
+                  new Date(status.authCheck.checkedAt).toLocaleString(),
+                )}
+              </div>
+            )}
+          {status?.authCheck?.failureCode && (
+            <div className={styles.value}>
+              {Locale.AdminConsole.Provider.CheckFailureCode(
+                status.authCheck.failureCode,
+              )}
+            </div>
+          )}
+          <IconButton
+            aria={Locale.AdminConsole.Provider.Check}
+            text={Locale.AdminConsole.Provider.Check}
+            bordered
+            disabled={busy}
+            onClick={() => void run(checkAdminProvider)}
+          />
         </div>
       </ListItem>
       <ListItem

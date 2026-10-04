@@ -37,6 +37,13 @@
     gap: 10px;
   }
 
+  .diagnostic {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
   .value {
     max-width: 260px;
     font-size: 12px;
