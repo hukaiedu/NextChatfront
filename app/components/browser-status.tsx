@@ -88,12 +88,6 @@ export function formatUptime(
   return `${seconds}s`;
 }
 
-function formatLoggedIn(loggedIn?: boolean | null): string {
-  if (loggedIn === true) return Locale.Browser.LoggedIn.Yes;
-  if (loggedIn === false) return Locale.Browser.LoggedIn.No;
-  return Locale.Browser.LoggedIn.Unknown;
-}
-
 function formatBrowserType(status: AdminBrowserStatus | null): string {
   if (!status?.browserType) return UNKNOWN;
   if (status.headless == null) return status.browserType;
@@ -129,10 +123,6 @@ export function browserStatusRows(
     {
       label: Locale.Browser.Fields.Profile,
       value: status?.profileDir ?? UNKNOWN,
-    },
-    {
-      label: Locale.Browser.Fields.LoggedIn,
-      value: formatLoggedIn(status?.providerLoggedIn),
     },
     {
       label: Locale.Browser.Fields.ActiveRequests,

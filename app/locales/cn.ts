@@ -737,7 +737,7 @@ const cn = {
   },
   Browser: {
     Title: "服务端浏览器",
-    SubTitle: "personChat 后端用来访问 Gemini Web 的浏览器实例",
+    SubTitle: "用于登录或恢复 Gemini 登录态；关闭后仍可使用保存的登录态",
     State: {
       RUNNING: "运行中",
       STARTING: "启动中",
@@ -785,6 +785,11 @@ const cn = {
     Empty: "—",
   },
   AdminConsole: {
+    LoginDescription: "登录后管理 Gemini 登录态与服务运行状态。",
+    PasswordLabel: "管理员密码",
+    Submitting: "正在登录…",
+    LoginProbing: "正在确认登录状态…",
+    BrowserDetails: "浏览器详情（排障）",
     Title: "管理控制台",
     LoginTitle: "管理员登录",
     PasswordPlaceholder: "请输入管理员密码",
@@ -815,8 +820,8 @@ const cn = {
       RevokeAllFailed: "吊销登录状态失败，请稍后重试",
     },
     Provider: {
-      Title: "Provider 运行状态",
-      SubTitle: "后端访问 Provider 所用页面的就绪程度",
+      Title: "Gemini 登录态",
+      SubTitle: "后端使用的 Gemini 登录态；检查结果显示在下方",
       State: {
         STOPPED: "未启动",
         STARTING: "启动中",
@@ -826,7 +831,7 @@ const cn = {
         ERROR: "异常",
       },
       Unknown: "状态未知",
-      Actions: "Provider 操作",
+      Actions: "登录与恢复",
       ActionsTip:
         "打开会启动并聚焦 Provider 页面；重启会关闭后按同一 Profile 重新启动",
       Check: "检查登录态",
@@ -842,9 +847,10 @@ const cn = {
       },
       CheckDetails: (count: number, time: string) =>
         `可用模型 ${count} 个 · 检查时间 ${time}`,
+      CheckTime: (time: string) => `检查时间 ${time}`,
       CheckFailureCode: (code: string) => `诊断码：${code}`,
-      Open: "打开 Provider",
-      OpenSuccess: "已打开 Provider 页面",
+      Open: "打开登录窗口",
+      OpenSuccess: "已打开 Gemini 登录窗口",
       Restart: "重启 Provider",
       RestartConfirm: "确认重启 Provider？会关闭当前页面，进行中的生成会失败。",
       RestartSuccess: "Provider 已重启",

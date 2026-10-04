@@ -2,11 +2,12 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 import { useAuthStore, LoginError } from "../../store/auth";
 import { getAuthSession } from "../../client/backend-api";
 import Locale from "../../locales";
-import styles from "../../components/auth-gate.module.scss";
+import styles from "./login.module.scss";
 
 /**
  * V1.3-C §16/§17:独立的管理员入口。
@@ -78,39 +79,73 @@ export default function AdminLoginPage() {
     return Locale.AdminConsole.Error.NETWORK_ERROR;
   };
 
-  if (probing) {
-    return <div className={styles["auth-gate"]} aria-busy="true" />;
-  }
-
   return (
-    <div className={styles["auth-gate"]}>
-      <form className={styles["form"]} onSubmit={submit}>
-        <div className={styles["title"]}>{Locale.AdminConsole.LoginTitle}</div>
-        {existing === "ANONYMOUS" && (
-          <div className={styles["error"]}>
-            {Locale.AdminConsole.SwitchWarning}
+    <main className={styles.page}>
+      <section className={styles.card} aria-labelledby="admin-login-title">
+        <div className={styles.brand}>
+          <img src="/icon.png" width="36" height="36" alt="" />
+          <span>personChat</span>
+        </div>
+        <h1 id="admin-login-title" className={styles.title}>
+          {Locale.AdminConsole.LoginTitle}
+        </h1>
+        <p className={styles.description}>
+          {Locale.AdminConsole.LoginDescription}
+        </p>
+        {probing ? (
+          <div className={styles.probing} role="status" aria-busy="true">
+            {Locale.AdminConsole.LoginProbing}
           </div>
+        ) : (
+          <form
+            className={styles.form}
+            onSubmit={submit}
+            aria-busy={submitting}
+          >
+            {existing === "ANONYMOUS" && (
+              <p className={styles.notice}>
+                {Locale.AdminConsole.SwitchWarning}
+              </p>
+            )}
+            <label className={styles.label} htmlFor="admin-password">
+              {Locale.AdminConsole.PasswordLabel}
+            </label>
+            <input
+              id="admin-password"
+              className={styles.input}
+              type="password"
+              name="password"
+              value={password}
+              placeholder={Locale.AdminConsole.PasswordPlaceholder}
+              autoComplete="current-password"
+              aria-invalid={!!adminLoginError}
+              aria-describedby={
+                adminLoginError ? "admin-login-error" : undefined
+              }
+              disabled={submitting}
+              autoFocus
+              onChange={(event) => setPassword(event.currentTarget.value)}
+            />
+            {adminLoginError && (
+              <p id="admin-login-error" className={styles.error} role="alert">
+                {errorText(adminLoginError)}
+              </p>
+            )}
+            <button
+              className={styles.submit}
+              type="submit"
+              disabled={submitting || !password}
+            >
+              {submitting
+                ? Locale.AdminConsole.Submitting
+                : Locale.AdminConsole.Submit}
+            </button>
+          </form>
         )}
-        <input
-          className={styles["input"]}
-          type="password"
-          name="password"
-          value={password}
-          placeholder={Locale.AdminConsole.PasswordPlaceholder}
-          autoFocus
-          onChange={(event) => setPassword(event.currentTarget.value)}
-        />
-        {adminLoginError && (
-          <div className={styles["error"]}>{errorText(adminLoginError)}</div>
-        )}
-        <button
-          className={styles["submit"]}
-          type="submit"
-          disabled={submitting || !password}
-        >
-          {Locale.AdminConsole.Submit}
-        </button>
-      </form>
-    </div>
+        <Link className={styles.back} href="/">
+          {Locale.AdminConsole.BackToChat}
+        </Link>
+      </section>
+    </main>
   );
 }

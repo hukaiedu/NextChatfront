@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 
 // 先导入 store:组件经 store/index 形成循环依赖,先完成 store 求值可避免 Locale 未初始化
 import { resetAuthBootstrapState, useAuthStore } from "../app/store/auth";
-import { stopBrowserStatusPolling } from "../app/store/browser";
+import { useBrowserStore, stopBrowserStatusPolling } from "../app/store/browser";
 import Locale from "../app/locales";
 
 /**
@@ -231,8 +231,11 @@ describe("C-ADMIN /admin 身份守卫", () => {
     expect(callsTo(BROWSER_STATUS)).toHaveLength(1);
     // V1.3-C FIX-01:Provider 状态面板同样只用 canonical 路径
     expect(screen.getByText(Locale.AdminConsole.Provider.Title)).toBeTruthy();
-    expect(screen.getByText(Locale.AdminConsole.Provider.State.READY)).toBeTruthy();
+    expect(screen.getByText(Locale.Browser.LoggedIn.Yes)).toBeTruthy();
     expect(callsTo(PROVIDER_STATUS)).toHaveLength(1);
+    const details = screen.getByText(Locale.AdminConsole.BrowserDetails).closest("details")!;
+    expect(details.hasAttribute("open")).toBe(false);
+    expect(screen.getAllByText(Locale.Browser.Fields.LoggedIn)).toHaveLength(1);
     expect(
       calls.some((c) => c.url === "/backend-api/provider/status"),
     ).toBe(false);
@@ -393,6 +396,49 @@ describe("C-ADMIN 登录状态收口", () => {
 });
 
 describe("C-ADMIN Provider 运维(FIX-01 补齐)", () => {
+  test("检查后同步浏览器登录态，浏览器关闭仍显示未运行", async () => {
+    let loggedIn = false;
+    route = (url, method) => {
+      if (url === SESSION)
+        return reply(200, { data: sessionData(true, "ADMIN") });
+      if (url === BROWSER_STATUS)
+        return reply(200, {
+          data: {
+            ...browserSnapshot(),
+            state: "STOPPED",
+            providerLoggedIn: loggedIn,
+          },
+        });
+      if (url === PROVIDER_STATUS)
+        return reply(200, {
+          data: providerSnapshot(loggedIn ? "READY" : "LOGIN_REQUIRED"),
+        });
+      if (url === PROVIDER_CHECK && method === "POST") {
+        loggedIn = true;
+        return reply(200, { data: providerSnapshot("READY") });
+      }
+      return undefined;
+    };
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+    expect(screen.getByText(Locale.Browser.LoggedIn.No)).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: Locale.AdminConsole.Provider.Check }),
+    );
+    await act(settle);
+    expect(screen.getByText(Locale.Browser.LoggedIn.Yes)).toBeTruthy();
+    expect(screen.getByText(Locale.Browser.State.STOPPED)).toBeTruthy();
+    expect(callsTo(BROWSER_STATUS, "GET").length).toBeGreaterThan(1);
+    loggedIn = false;
+    await act(async () => {
+      await useBrowserStore.getState().refresh(true);
+      await settle();
+    });
+    expect(screen.getByText(Locale.Browser.LoggedIn.No)).toBeTruthy();
+    expect(screen.getByText(Locale.Browser.LoggedIn.No)).toBeTruthy();
+  });
+
+
   test("C-ADMIN-12 手动检查登录态:只展示模型目录检查结果并走 Admin 接口", async () => {
     adminSurface((url, method) =>
       url === PROVIDER_CHECK && method === "POST"

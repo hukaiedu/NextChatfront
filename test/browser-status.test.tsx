@@ -171,7 +171,6 @@ describe("浏览器状态拉取", () => {
       EMPTY,
       EMPTY,
       EMPTY,
-      Locale.Browser.LoggedIn.Unknown,
       EMPTY,
       EMPTY,
       EMPTY,
@@ -306,7 +305,7 @@ describe("Admin 面板渲染", () => {
     expect(screen.getByText(Locale.Browser.State.RUNNING)).toBeTruthy();
     expect(screen.getByText(Locale.Browser.Fields.Profile)).toBeTruthy();
     expect(screen.getByText("data/browser-profile")).toBeTruthy();
-    expect(screen.getByText(Locale.Browser.LoggedIn.Yes)).toBeTruthy();
+    expect(screen.queryByText(Locale.Browser.Fields.LoggedIn)).toBeNull();
     // 行标题 + 按钮文案各一处
     expect(screen.getAllByText(Locale.Browser.Actions.Restart)).toHaveLength(2);
     expect(statusCalls()[0].url).toBe(STATUS_URL);
