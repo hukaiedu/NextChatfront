@@ -1,7 +1,7 @@
 import { jest } from "@jest/globals";
 import fs from "node:fs";
 import React from "react";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { ChatSession } from "../app/store/chat";
 
@@ -162,7 +162,11 @@ function source(file: string): string {
 
 /** 取某个规则块:只在行首匹配选择器(避开同名的嵌套副本),按花括号配对取整块 */
 function ruleBlock(file: string, selector: string): string {
-  const at = file.indexOf("\n" + selector);
+  let at = file.indexOf("\n" + selector);
+  // 逗号分组中的最后一行不是独立规则；继续找该选择器自身的覆盖声明。
+  while (at >= 0 && file.slice(0, at).trimEnd().endsWith(",")) {
+    at = file.indexOf("\n" + selector, at + 1);
+  }
   expect(at).toBeGreaterThanOrEqual(0);
   const start = at + 1;
   const open = file.indexOf("{", start);
@@ -175,6 +179,28 @@ function ruleBlock(file: string, selector: string): string {
     }
   }
   throw new Error(`unbalanced block: ${selector}`);
+}
+
+/** 只取规则自身的声明；嵌套伪元素或子规则不能代替父规则的布局。 */
+function ownDeclarations(block: string): string {
+  const declarations: string[] = [];
+  let pending = "";
+  let depth = 0;
+  for (const character of block.slice(block.indexOf("{") + 1, -1)) {
+    if (character === "{") {
+      depth += 1;
+      pending = "";
+    } else if (character === "}") {
+      depth -= 1;
+      pending = "";
+    } else if (depth === 0 && character === ";") {
+      declarations.push(pending.trim() + ";");
+      pending = "";
+    } else if (depth === 0) {
+      pending += character;
+    }
+  }
+  return declarations.join("\n");
 }
 
 function setViewport(width: number) {
@@ -339,7 +365,9 @@ describe("V1.5 §3 Sidebar 骨架", () => {
     const home = source(HOME_SCSS);
     const sidebar = ruleBlock(home, ".sidebar {");
     expect(sidebar).toContain("width: var(--sidebar-width)");
-    expect(sidebar).toContain("background-color: var(--color-sidebar)");
+    expect(ownDeclarations(sidebar)).toMatch(
+      /background-color:\s*color-mix\(in srgb, var\(--color-sidebar\)\s+\d+%,\s*#[a-f\d]+\s+\d+%\)/i,
+    );
 
     const globals = source("app/styles/globals.scss");
     expect(globals).toContain("--sidebar-width: 260px;");
@@ -466,7 +494,7 @@ describe("V1.5 §4 空白首页", () => {
 });
 
 describe("V1.5 §5 Composer", () => {
-  test("UI-CMP-01 模型选择在卡片底部左侧,附件与发送在右侧", async () => {
+  test("UI-CMP-01 底部左侧附件按钮可操作,模型选择与发送在右侧", async () => {
     seedSessions([fakeSession("s-empty", "新会话")]);
     renderChat();
     await act(settle);
@@ -476,18 +504,30 @@ describe("V1.5 §5 Composer", () => {
     const right = toolbar.lastElementChild as HTMLElement;
     expect(left).toBeTruthy();
     expect(right).not.toBe(left);
-    expect(left.textContent).toContain(Locale.Chat.ModelSelector.Default);
-    expect(right.textContent).toContain(Locale.Chat.InputActions.UploadImage);
-    expect(right.textContent).toContain(Locale.Chat.Send);
-
-    const upload = nodeOf(Locale.Chat.InputActions.UploadImage);
-    const send = buttonOf(Locale.Chat.Send);
-    expect(right.contains(upload)).toBeTruthy();
-    expect(right.contains(send)).toBeTruthy();
+    const upload = within(left).getByRole("button", {
+      name: Locale.Chat.InputActions.UploadFile,
+    });
+    const model = within(right).getByRole("button", {
+      name: new RegExp(Locale.Chat.ModelSelector.Default),
+    });
+    const send = within(right).getByRole("button", {
+      name: new RegExp(Locale.Chat.Send),
+    });
+    expect(upload).toBeEnabled();
+    expect(model).toBeEnabled();
     expect(left.contains(send)).toBeFalsy();
     expect(
-      upload.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING,
+      model.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).not.toBeNull();
+    const openPicker = jest.spyOn(fileInput, "click").mockImplementation(() => {});
+    try {
+      fireEvent.click(upload);
+      expect(openPicker).toHaveBeenCalledTimes(1);
+    } finally {
+      openPicker.mockRestore();
+    }
   });
 
   test("UI-CMP-02 工具条与输入框同处一张卡片,卡片仍是 textarea 的 label", async () => {
@@ -587,32 +627,42 @@ describe("V1.5 §5 Composer", () => {
     await act(settle);
 
     const toolbar = composerToolbar();
-    const left = toolbar.firstElementChild as HTMLElement;
-    const modelButton = left.querySelector("button");
-    expect(modelButton).toBeTruthy();
+    const right = toolbar.lastElementChild as HTMLElement;
+    const modelButton = within(right).getByRole("button", {
+      name: new RegExp(Locale.Chat.ModelSelector.Default),
+    });
     act(() => {
       fireEvent.click(modelButton as Element);
     });
     await act(settle);
 
-    const menu = document.querySelector('[role="menu"]');
-    expect(menu).toBeTruthy();
-    expect(menu?.textContent).toContain(Locale.Chat.ModelSelector.Default);
-    // 菜单锚在左列(§5 底部左侧),向上展开以免被视口下沿裁掉
-    expect(left.contains(menu)).toBeTruthy();
+    const menu = within(right).getByRole("menu");
+    const defaultOption = within(menu).getByRole("menuitem", {
+      name: Locale.Chat.ModelSelector.Default,
+    });
+    expect(defaultOption).toBeEnabled();
+    fireEvent.click(defaultOption);
+    await act(settle);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(within(right).getByRole("button", {
+      name: new RegExp(Locale.Chat.ModelSelector.Default),
+    })).toBeEnabled();
+    // 菜单锚在右列，向上展开以免被视口下沿裁掉。
     const scss = source("app/components/model-selector.module.scss");
     expect(scss).toMatch(/\.anchor-up \.menu \{[^}]*bottom: calc\(100% \+ 4px\)/);
   });
 
-  test("UI-CMP-06 工具条内的动作自带胶囊样式(离开 .chat-input-actions 也不竖排溢出)", () => {
+  test("UI-CMP-06 工具条为可换行横排,附件图标按钮尺寸明确且右列靠右", () => {
     const chat = source(CHAT_SCSS);
-    const action = ruleBlock(
-      chat,
-      ".chat-input-panel .chat-input-toolbar .chat-input-action {",
-    );
+    const toolbar = ownDeclarations(ruleBlock(chat, ".chat-input-toolbar {"));
+    expect(toolbar).toContain("display: flex");
+    expect(toolbar).toContain("flex-wrap: wrap");
+    const action = ownDeclarations(ruleBlock(chat, ".attach-add-button {"));
     expect(action).toContain("display: inline-flex");
-    // 工具条不做 hover 展开,文字必须常驻可见
-    expect(action).toMatch(/\.text \{[^}]*opacity: 1/);
+    expect(action).toContain("width: 34px");
+    expect(action).toContain("height: 34px");
+    expect(action).toContain("border-radius: 50%");
+    expect(ownDeclarations(ruleBlock(chat, ".chat-input-toolbar-right {"))).toContain("margin-left: auto");
   });
 
   test("UI-CMP-07 输入框有显式无障碍名称(不被包裹的 label 污染)", async () => {
@@ -685,9 +735,9 @@ describe("V1.5 §6/§7/§9 布局与配色令牌", () => {
     expect(inner).not.toContain("box-shadow: var(--shadow)");
   });
 
-  test("UI-TK-04 Composer 排在滚动区之后、非浮层,天然不遮最后一条消息", () => {
+  test("UI-TK-04 Composer 排在滚动区之后、非浮层,天然不遮最后一条消息", async () => {
     const chat = source(CHAT_SCSS);
-    const panel = ruleBlock(chat, ".chat-input-panel {");
+    const panel = ownDeclarations(ruleBlock(chat, ".chat-input-panel {"));
     expect(panel).toContain("position: relative");
     expect(panel).not.toContain("position: absolute");
     expect(panel).not.toContain("position: fixed");
@@ -698,6 +748,14 @@ describe("V1.5 §6/§7/§9 布局与配色令牌", () => {
       tsx.indexOf('styles["chat-input-panel"]'),
     );
     expect(tsx).not.toContain("position: sticky");
+    const message = createMessage({ role: "assistant", content: "最后一条消息" });
+    seedSessions([fakeSession("s-layout", "布局检查", { messages: [message] })]);
+    const view = renderChat();
+    await act(settle);
+    const row = view.container.querySelector(`[data-message-id="${message.id}"]`);
+    expect(row).not.toBeNull();
+    expect(row!.compareDocumentPosition(inputBox()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(inputBox().closest("label")!.contains(row)).toBe(false);
   });
 
   test("UI-TK-05 配色是浅色留白系:三档底色 + 淡分隔线,无渐变/霓虹", () => {

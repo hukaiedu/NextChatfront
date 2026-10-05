@@ -1,5 +1,12 @@
 @import "../styles/animation.scss";
 
+.attach-preparing {
+  margin: 0;
+  padding: 12px 14px 0;
+  color: var(--color-text-soft);
+  font-size: 12px;
+}
+
 .attach-images {
   display: flex;
   flex-wrap: wrap;

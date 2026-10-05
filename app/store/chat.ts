@@ -70,6 +70,8 @@ export type ChatMessageTool = {
 export type ChatMessage = RequestMessage & {
   date: string;
   streaming?: boolean;
+  /** 后端 Request 的派生状态，仅用于展示，不参与订阅与准入判定。 */
+  backendStatus?: BackendRequest["status"];
   isError?: boolean;
   /** 后端 Request 的错误码,失败气泡按它给提示 */
   errorCode?: string;
@@ -171,6 +173,7 @@ const ERROR_TEXT: Record<string, string> = {
   CHAT_FAILED: "请求失败,请重试。",
   SERVICE_BUSY: "服务暂时繁忙,请稍后重试。",
   REQUEST_TIMEOUT: "请求超时,请重试。",
+  CONVERSATION_LIMIT_REACHED: "会话存储数量已达到上限，请联系管理员。",
   CONVERSATION_NOT_FOUND: "会话不存在",
   CONVERSATION_DELETED: "会话已删除",
   CONVERSATION_ARCHIVED: "会话已归档,请先恢复后再发送",
@@ -265,7 +268,7 @@ function toChatRole(role: BackendMessage["role"]): MessageRole {
 /**
  * 状态映射(第 7 阶段 §六):
  * PENDING / STREAMING → streaming(加载 / 逐字),COMPLETED → 完成,FAILED → 错误。
- * 不引入第二套状态,复用 NextChat 的 streaming + isError 两个标记。
+ * streaming + isError 保持既有行为，backendStatus 派生自后端用于区分排队与执行。
  */
 function toChatMessage(message: BackendMessage): ChatMessage {
   const failed = message.status === "FAILED";
@@ -277,6 +280,15 @@ function toChatMessage(message: BackendMessage): ChatMessage {
     date: new Date(message.createdAt).toLocaleString(),
     streaming:
       message.role === "ASSISTANT" && !isMessageSettled(message.status),
+    backendStatus:
+      message.role === "ASSISTANT"
+        ? request?.status ??
+          (message.status === "STREAMING"
+            ? "PROCESSING"
+            : message.status === "COMPLETED"
+            ? "SUCCESS"
+            : message.status)
+        : undefined,
     isError: message.role === "ASSISTANT" && failed,
     errorCode: failed ? request?.errorCode ?? undefined : undefined,
     model: BACKEND_MODEL_LABEL,
@@ -299,17 +311,34 @@ function isMessageSettled(status: BackendMessage["status"]): boolean {
  * bootstrap 同 id overlay / send-result ASSISTANT upsert)。
  * 规则表(状态只允许向终态推进,不允许倒退):
  * - local 终态 + fresh PENDING/STREAMING → local(stale 后端快照不得倒退本地终态/流式内容)
- * - local streaming + fresh 非 settled → local(防 SSE delta 闪断)
+ * - local streaming + fresh 非 settled → 保留 local 内容，只允许活动状态前进
  * - local streaming + fresh settled → fresh(向终态推进,合法)
  * - 其他 → fresh(后端权威)
  * ChatMessage 里 settled ⇔ streaming!==true(FAILED/CANCELLED/COMPLETED 均推导出 false),
- * 于是四行收敛为:fresh 未终态 → 保留 local,fresh 已终态 → 采用 fresh。
+ * fresh 已终态采用 fresh；未终态快照只推进展示状态，不覆盖本地流式内容。
  */
 export function mergeFreshMessageWithLocal(
   fresh: ChatMessage,
   local: ChatMessage,
 ): ChatMessage {
-  return fresh.streaming ? local : fresh;
+  if (!fresh.streaming) return fresh;
+  // 历史/POST 的旧快照不得倒退终态或取消中；允许排队推进至实际执行。
+  if (
+    local.streaming &&
+    (local.backendStatus === "PENDING" || local.backendStatus === undefined) &&
+    (fresh.backendStatus === "PROCESSING" ||
+      fresh.backendStatus === "CANCELLING")
+  ) {
+    return { ...local, backendStatus: fresh.backendStatus };
+  }
+  if (
+    local.streaming &&
+    local.backendStatus === "PROCESSING" &&
+    fresh.backendStatus === "CANCELLING"
+  ) {
+    return { ...local, backendStatus: fresh.backendStatus };
+  }
+  return local;
 }
 
 /**
@@ -464,6 +493,29 @@ function applyStatusToMessage(
   frame: RequestStatusFrame,
   session?: ChatSession,
 ): void {
+  if (
+    message.backendStatus &&
+    isRequestFinished(message.backendStatus) &&
+    !isRequestFinished(frame.requestStatus)
+  )
+    return;
+  // 重连或迟到状态帧不能让已经执行/取消中的请求重新显示为排队。
+  if (
+    message.streaming &&
+    !(
+      frame.requestStatus === "PENDING" &&
+      message.backendStatus !== "PENDING" &&
+      message.backendStatus !== undefined
+    ) &&
+    !(
+      frame.requestStatus === "PROCESSING" &&
+      message.backendStatus === "CANCELLING"
+    )
+  ) {
+    message.backendStatus = frame.requestStatus;
+  } else if (isRequestFinished(frame.requestStatus)) {
+    message.backendStatus = frame.requestStatus;
+  }
   if (frame.requestStatus === "CANCELLING") {
     message.streaming = true;
     if (session) session.cancelling = true;
@@ -1910,6 +1962,8 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           patchMessage(conversationId, messageId, (message) => {
             message.content = text;
             message.streaming = true;
+            if (message.backendStatus !== "CANCELLING")
+              message.backendStatus = "PROCESSING";
           });
         },
         onStatus(frame) {
@@ -1922,6 +1976,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           patchMessage(conversationId, messageId, (message) => {
             message.streaming = false;
             message.isError = true;
+            message.backendStatus = "FAILED";
             message.errorCode = error.code;
           });
         },
@@ -1929,6 +1984,7 @@ export const useChatStore = create<ChatStore>()((set, get) => {
           forgetStream(conversationId);
           patchMessage(conversationId, messageId, (message) => {
             message.streaming = false;
+            message.backendStatus = final.requestStatus;
             if (
               final.status === "FAILED" ||
               final.requestStatus === "TIMEOUT"

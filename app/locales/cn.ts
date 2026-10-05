@@ -102,6 +102,11 @@ const cn = {
     ChatItemCount: (count: number) => `${count} 条对话`,
   },
   Chat: {
+    Progress: {
+      Pending: "排队中",
+      Processing: "生成中",
+      Cancelling: "正在取消",
+    },
     SubTitle: (count: number) => `共 ${count} 条对话`,
     HistoryLoading: "加载历史…",
     HistoryError: "加载历史失败",
