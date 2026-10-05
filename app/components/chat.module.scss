@@ -385,21 +385,7 @@
   flex-direction: column;
   position: relative;
   height: 100%;
-  background-color: var(--color-canvas);
-  isolation: isolate;
-
-  &::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    background-image: url("/background.png");
-    background-position: center;
-    background-repeat: no-repeat;
-    background-size: cover;
-    opacity: 0.58;
-    pointer-events: none;
-  }
+  background-color: transparent;
 }
 
 .chat-header {
@@ -647,6 +633,14 @@
   transition: all ease 0.3s;
 }
 
+.chat-message > .chat-message-container > .chat-message-item,
+.chat-message-user > .chat-message-container > .chat-message-item {
+  padding: 10px 16px;
+  border: 1px solid var(--color-line);
+  background-color: color-mix(in srgb, var(--color-surface) 45%, transparent);
+  backdrop-filter: blur(4px);
+}
+
 .chat-message-audio {
   display: flex;
   align-items: center;
@@ -765,9 +759,6 @@
 }
 
 .chat-message-user > .chat-message-container > .chat-message-item {
-  background-color: var(--color-bubble-user);
-  padding: 10px 16px;
-
   &:hover {
     min-width: 0;
   }

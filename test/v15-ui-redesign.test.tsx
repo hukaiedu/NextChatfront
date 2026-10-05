@@ -365,9 +365,10 @@ describe("V1.5 §3 Sidebar 骨架", () => {
     const home = source(HOME_SCSS);
     const sidebar = ruleBlock(home, ".sidebar {");
     expect(sidebar).toContain("width: var(--sidebar-width)");
-    expect(ownDeclarations(sidebar)).toMatch(
-      /background-color:\s*color-mix\(in srgb, var\(--color-sidebar\)\s+\d+%,\s*#[a-f\d]+\s+\d+%\)/i,
+    expect(sidebar).toContain(
+      "color-mix(in srgb, var(--color-sidebar) 76%, #d7dfc7 24%) 58%,",
     );
+    expect(sidebar).toContain("backdrop-filter: blur(4px)");
 
     const globals = source("app/styles/globals.scss");
     expect(globals).toContain("--sidebar-width: 260px;");
@@ -507,9 +508,7 @@ describe("V1.5 §5 Composer", () => {
     const upload = within(left).getByRole("button", {
       name: Locale.Chat.InputActions.UploadFile,
     });
-    const model = within(right).getByRole("button", {
-      name: new RegExp(Locale.Chat.ModelSelector.Default),
-    });
+    const model = within(right).getByRole("button", { name: /Flash/ });
     const send = within(right).getByRole("button", {
       name: new RegExp(Locale.Chat.Send),
     });
@@ -621,32 +620,41 @@ describe("V1.5 §5 Composer", () => {
     expect(buttonOf(Locale.Chat.InputActions.Stop).disabled).toBe(true);
   });
 
-  test("UI-CMP-05 模型选择器搬到 Composer 底部后仍能开菜单选默认(业务逻辑未动)", async () => {
+  test("UI-CMP-05 模型菜单只列出 Gemini 模型,不提供默认模型项", async () => {
     seedSessions([fakeSession("s-empty", "新会话")]);
+    act(() => {
+      useChatStore.setState({
+        modelCatalog: [
+          { key: "flash", label: "3.6 Flash", selected: false, disabled: false },
+          { key: "reasoning", label: "3.6 Raciocínio", selected: false, disabled: false },
+          { key: "pro", label: "3.1 Pro", selected: false, disabled: false },
+        ],
+        modelCatalogStatus: "ready",
+      });
+    });
     renderChat();
     await act(settle);
 
     const toolbar = composerToolbar();
     const right = toolbar.lastElementChild as HTMLElement;
-    const modelButton = within(right).getByRole("button", {
-      name: new RegExp(Locale.Chat.ModelSelector.Default),
-    });
+    const modelButton = within(right).getByRole("button", { name: /3\.6 Flash/ });
     act(() => {
       fireEvent.click(modelButton as Element);
     });
     await act(settle);
 
     const menu = within(right).getByRole("menu");
-    const defaultOption = within(menu).getByRole("menuitem", {
-      name: Locale.Chat.ModelSelector.Default,
-    });
-    expect(defaultOption).toBeEnabled();
-    fireEvent.click(defaultOption);
-    await act(settle);
-    expect(screen.queryByRole("menu")).toBeNull();
-    expect(within(right).getByRole("button", {
-      name: new RegExp(Locale.Chat.ModelSelector.Default),
-    })).toBeEnabled();
+    expect(
+      within(menu).queryByRole("menuitem", {
+        name: Locale.Chat.ModelSelector.Default,
+      }),
+    ).toBeNull();
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(3);
+    const flashOption = within(menu).getByRole("menuitem", { name: "3.6 Flash" });
+    expect(flashOption).toBeEnabled();
+    expect(flashOption.children).toHaveLength(3);
+    expect(within(menu).getByRole("menuitem", { name: "3.6 Raciocínio" })).toBeEnabled();
+    expect(within(menu).getByRole("menuitem", { name: "3.1 Pro" })).toBeEnabled();
     // 菜单锚在右列，向上展开以免被视口下沿裁掉。
     const scss = source("app/components/model-selector.module.scss");
     expect(scss).toMatch(/\.anchor-up \.menu \{[^}]*bottom: calc\(100% \+ 4px\)/);
@@ -706,18 +714,22 @@ describe("V1.5 §6/§7/§9 布局与配色令牌", () => {
     expect(chat).toContain("margin-right: auto");
   });
 
-  test("UI-TK-02 AI 消息无重气泡、用户消息淡背景 + 中等圆角", () => {
+  test("UI-TK-02 AI 与用户消息共用轻透明底板", () => {
     const chat = source(CHAT_SCSS);
     const item = ruleBlock(chat, ".chat-message-item {");
     expect(item).toContain("background-color: transparent");
     expect(item).toContain("border: none");
     expect(item).toContain("border-radius: var(--bubble-radius)");
 
+    expect(chat).toMatch(
+      /\.chat-message > \.chat-message-container > \.chat-message-item,\s*\.chat-message-user > \.chat-message-container > \.chat-message-item\s*\{[^}]*border: 1px solid var\(--color-line\)[^}]*color-mix\(in srgb, var\(--color-surface\) 45%, transparent\)[^}]*backdrop-filter: blur\(4px\)/s,
+    );
+
     const user = ruleBlock(
       chat,
       ".chat-message-user > .chat-message-container > .chat-message-item {",
     );
-    expect(user).toContain("var(--color-bubble-user)");
+    expect(user).not.toContain("background-color");
     expect(user).not.toContain("box-shadow");
   });
 
@@ -783,6 +795,22 @@ describe("V1.5 §6/§7/§9 布局与配色令牌", () => {
       ]);
     }
     expect(source(HOME_SCSS)).not.toContain("linear-gradient");
+  });
+
+  test("UI-TK-06 背景图覆盖整个应用,侧栏与聊天区都能透出", () => {
+    const home = source(HOME_SCSS);
+    const container = ruleBlock(home, ".container {");
+    expect(container).toContain('background-image: url("/background.png")');
+    expect(container).toContain("background-size: cover");
+    expect(container).toContain("opacity: 0.78");
+
+    const sidebar = ruleBlock(home, ".sidebar {");
+    expect(sidebar).toContain("transparent");
+    expect(sidebar).toContain("backdrop-filter: blur(4px)");
+
+    const chat = ruleBlock(source(CHAT_SCSS), ".chat {");
+    expect(chat).toContain("background-color: transparent");
+    expect(chat).not.toContain("background-image");
   });
 });
 

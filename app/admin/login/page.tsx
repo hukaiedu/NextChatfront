@@ -83,7 +83,7 @@ export default function AdminLoginPage() {
     <main className={styles.page}>
       <section className={styles.card} aria-labelledby="admin-login-title">
         <div className={styles.brand}>
-          <img src="/icon.png" width="36" height="36" alt="" />
+          <img src="/mark.png" width="36" height="36" alt="" />
           <span>personChat</span>
         </div>
         <h1 id="admin-login-title" className={styles.title}>
