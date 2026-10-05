@@ -108,6 +108,11 @@ const en: LocaleType = {
     ChatItemCount: (count: number) => `${count} messages`,
   },
   Chat: {
+    Progress: {
+      Pending: "Queued",
+      Processing: "Generating",
+      Cancelling: "Cancelling",
+    },
     SubTitle: (count: number) => `${count} messages`,
     HistoryLoading: "Loading history…",
     HistoryError: "Failed to load history",

@@ -1,5 +1,6 @@
 import { useDebouncedCallback } from "use-debounce";
 import { nanoid } from "nanoid";
+import { RequestProgress } from "./request-progress";
 import React, {
   Fragment,
   RefObject,
@@ -1348,6 +1349,9 @@ function ChatInner(props: { attachment: AttachmentController }) {
                           )}
                         </div>
                         <div className={styles["chat-message-item"]}>
+                          {!isUser && message.streaming && (
+                            <RequestProgress status={message.backendStatus} />
+                          )}
                           <Markdown
                             key={message.streaming ? "loading" : "done"}
                             content={getMessageTextContent(message)}
@@ -1476,6 +1480,15 @@ function ChatInner(props: { attachment: AttachmentController }) {
                 onDragLeave={onFilesDragLeave}
                 onDrop={onFilesDrop}
               >
+                {attachment.isPreparingImages && (
+                  <p
+                    className={styles["attach-preparing"]}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {Locale.Chat.ImagePreparing}
+                  </p>
+                )}
                 {attachment.pendingImages.length > 0 && (
                   <div className={styles["attach-images"]}>
                     {attachment.pendingImages.map((image) => (
@@ -1745,6 +1758,7 @@ export function Chat() {
             addedBytes += image.bytes;
             setPendingImages((prev) => [...prev, image]);
           } catch (error) {
+            if (capturedEpoch !== attachmentEpochRef.current) return;
             // R28:单张本地失败只拒绝该张,批次继续,已成功项保留
             showToast(
               Locale.Chat[

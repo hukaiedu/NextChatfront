@@ -29,14 +29,10 @@ import type {
  * 使"准备中(PREPARING)"与"POST 在途(SUBMITTING)"两个窗口可被精确挂起。
  */
 
-// 默认 svg mock(test/svg-mock.tsx)渲染 null,DeleteIcon 在 jsdom 里没有 DOM
-// 节点。本文件把该 mock 渲染为 span 并透传 props(className/role/aria-label/
-// onClick),托盘删除按钮才能被真实点击。仅影响本测试文件。
-// (ESM 下 jest.mock 不生效,must 用 unstable_mockModule;路径基准是 rootDir。)
+// 图标占位透传 aria-hidden，使占位卡的装饰元素可访问性检查有效。
 jest.unstable_mockModule("./test/svg-mock.tsx", () => ({
   __esModule: true,
-  default: (props: Record<string, unknown>) =>
-    React.createElement("span", props),
+  default: (props: Record<string, unknown>) => React.createElement("span", props),
 }));
 
 const STAMP = "2026-09-10T00:00:00.000Z";
@@ -83,7 +79,10 @@ class FakeFileReader {
       throw new Error("测试文件未设置 __dataUrl");
     }
     this.result = dataUrl;
-    const fire = () => this.onload?.({ target: { result: dataUrl } });
+    const fire = () =>
+      (file as File & { __readError?: boolean }).__readError
+        ? this.onerror?.()
+        : this.onload?.({ target: { result: dataUrl } });
     if (readerHold) heldReaders.push(fire);
     else queueMicrotask(fire);
   }
@@ -445,11 +444,11 @@ const trayImages = () =>
 const trayHasUrl = (url: string) =>
   trayImages().some((el) => (el.getAttribute("style") ?? "").includes(url));
 
-/** 托盘删除按钮 = svg mock 透传出的 span(aria-label 随 UI 语言) */
+/** 使用真实原生删除按钮及其可访问名称，避免依赖图标实现。 */
 const deleteIcons = () =>
   Array.from(
-    composer().querySelectorAll(`span[aria-label="${Locale.Chat.Actions.Delete}"]`),
-  ) as HTMLElement[];
+    composer().querySelectorAll(`button[aria-label^="${Locale.Chat.RemoveFile}:"]`),
+  ) as HTMLButtonElement[];
 
 function composer(): HTMLElement {
   const label = document.querySelector('label[for="chat-input"]');
@@ -477,12 +476,8 @@ const sendDisabled = () => sendButton().disabled;
 const isStopButton = () =>
   sendButton().textContent === Locale.Chat.InputActions.Stop;
 
-function pickerElement(): HTMLElement {
-  const element =
-    screen.queryByText(Locale.Chat.InputActions.UploadImage) ??
-    screen.queryByText(Locale.Chat.ImagePreparing);
-  if (!element) throw new Error("上传图片入口未找到");
-  return element;
+function pickerElement(): HTMLButtonElement {
+  return screen.getByRole("button", { name: Locale.Chat.InputActions.UploadFile });
 }
 
 function textArea(): HTMLTextAreaElement {
@@ -642,9 +637,8 @@ beforeEach(async () => {
   heldReaders = [];
   heldImages = [];
   pasteFallbackDataUrls.clear();
-  // 上一用例的图片弹窗(ui-lib 直接挂到 body)不得串场;toast 只按文本断言,
-  // 不参与结构查询,故无需清理
-  document.querySelectorAll(".modal-mask").forEach((modal) => modal.remove());
+  // 弹窗和 toast 都在 Testing Library 的 root 外，必须隔离，防止旧 toast 掩盖当前错误。
+  document.body.replaceChildren();
   inputClickSpy = jest
     .spyOn(HTMLInputElement.prototype, "click")
     .mockImplementation(() => {}) as unknown as jest.Mock;
@@ -773,7 +767,7 @@ describe("I3-A 附件托盘(I3-PREVIEW)", () => {
     // 准备中(第二批挂起):设计只禁 Send / picker,托盘删除仍可用
     readerHold = true;
     await pickFiles([fileOf("b.png", "image/png", 1024, GIF_C)]);
-    expect(deleteIcons()[0].getAttribute("aria-disabled")).toBeNull();
+    expect(deleteIcons()[0]).not.toBeDisabled();
     await act(async () => {
       fireEvent.click(deleteIcons()[0]);
       await tick();
@@ -789,7 +783,7 @@ describe("I3-A 附件托盘(I3-PREVIEW)", () => {
     // POST 在途:R35 托盘删除 disabled(点击无效)
     const hold = holdSend("c-1");
     await clickSend();
-    expect(deleteIcons()[0].getAttribute("aria-disabled")).toBe("true");
+    expect(deleteIcons()[0]).toBeDisabled();
     await act(async () => {
       fireEvent.click(deleteIcons()[0]);
       await tick();
@@ -800,13 +794,12 @@ describe("I3-A 附件托盘(I3-PREVIEW)", () => {
     expect(trayImages()).toHaveLength(0);
   });
 
-  test("I3-PREVIEW-05 移动端 mask 常显(scss 静态检查,max-width 600px 下 opacity 1)", () => {
+  test("I3-PREVIEW-05 删除按钮不依赖 hover，可在桌面和触屏操作", () => {
     const scss = fs.readFileSync("app/components/chat.module.scss", "utf8");
-    const hoverRule = scss.indexOf(".attach-image-mask:hover");
-    expect(hoverRule).toBeGreaterThanOrEqual(0);
-    expect(scss.slice(hoverRule)).toMatch(
-      /@media only screen and \(max-width: 600px\)\s*\{\s*\.attach-image \.attach-image-mask\s*\{\s*opacity: 1;/,
-    );
+    const removeRule = scss.slice(scss.indexOf("  .attach-image-remove {"), scss.indexOf(".attach-documents {"));
+    expect(removeRule).toMatch(/display:\s*flex/);
+    expect(removeRule).not.toMatch(/opacity:\s*0(?:[;\s])/);
+    expect(removeRule).not.toContain(":hover");
   });
 });
 
@@ -1187,6 +1180,36 @@ describe("I3-A 跨会话竞态(I3-MEM-CONV)", () => {
     expect(screen.queryByText(Locale.Chat.ImagePreparing)).toBeNull();
     expect(sendDisabled()).toBe(false);
   });
+
+  test("I3-MEM-CONV-02 当前会话读取失败仍提示错误", async () => {
+    server.conversations = [conversation("c-1")];
+    applySessions([makeSession()]);
+    await renderChat();
+    const file = fileOf("broken.png", "image/png", 1024);
+    Object.assign(file, { __readError: true });
+    await pickFiles([file]);
+    await flush();
+    expect(bodyText()).toContain(Locale.Chat.ImageReadFailed);
+    expect(trayImages()).toHaveLength(0);
+    expect(sendDisabled()).toBe(false);
+  });
+
+  test("I3-MEM-CONV-03 切换后旧读取失败不向新会话显示错误", async () => {
+    server.conversations = [conversation("c-1"), conversation("c-2")];
+    applySessions([makeSession(), makeSession({ id: "c-2" })]);
+    await renderChat();
+    const file = fileOf("broken.png", "image/png", 1024);
+    Object.assign(file, { __readError: true });
+    readerHold = true;
+    await pickFiles([file]);
+    expect(heldReaders).toHaveLength(1);
+    await switchTo(1);
+    await act(async () => { releaseReaders(); await tick(); });
+    await flush();
+    expect(bodyText()).not.toContain(Locale.Chat.ImageReadFailed);
+    expect(trayImages()).toHaveLength(0);
+    expect(sendDisabled()).toBe(false);
+  });
 });
 
 // ---- I3-MEM:附件状态的生命周期 ----
@@ -1505,7 +1528,7 @@ describe("I3-B 粘贴上传(I3B-PASTE)", () => {
     expect(isStopButton()).toBe(true);
   });
 
-  test("I3B-PASTE-10 unsupported image:复用 ImageTypeUnsupported、不入 tray、不 preventDefault", async () => {
+  test("I3B-PASTE-10 unsupported image:复用 FileTypeUnsupported、不入 tray、不 preventDefault", async () => {
     server.conversations = [conversation("c-1")];
     applySessions([makeSession()]);
     await renderChat();
@@ -1521,7 +1544,7 @@ describe("I3-B 粘贴上传(I3B-PASTE)", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(trayImages()).toHaveLength(0);
-    expect(bodyText()).toContain(Locale.Chat.ImageTypeUnsupported);
+    expect(bodyText()).toContain(Locale.Chat.FileTypeUnsupported);
   });
 
   test("I3B-PASTE-11 supported image + text:图片优先(preventDefault + 入 tray)", async () => {
@@ -1611,7 +1634,7 @@ describe("I3-B 粘贴上传(I3B-PASTE)", () => {
     // jsdom 不执行浏览器默认文本插入 → 「文本最终进入 textarea」由 REAL-I3B-08 证明
     expect(event.defaultPrevented).toBe(false);
     expect(trayImages()).toHaveLength(0);
-    expect(bodyText()).toContain(Locale.Chat.ImageTypeUnsupported);
+    expect(bodyText()).toContain(Locale.Chat.FileTypeUnsupported);
   });
 });
 
