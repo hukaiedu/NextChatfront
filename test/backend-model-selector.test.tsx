@@ -380,7 +380,7 @@ describe("M4-FIX-01:草稿会话模型选择", () => {
 
     render(<ModelSelectorButton />);
 
-    const button = screen.getByText(Locale.Chat.ModelSelector.Default).closest("button");
+    const button = screen.getByText("Flash").closest("button");
     expect(button).not.toBeDisabled();
     fireEvent.click(button!);
     expect(screen.getByText("模型甲")).toBeInTheDocument();
@@ -674,7 +674,13 @@ describe("M4:选择器 UI(§十一/§十二/§十七)", () => {
     useChatStore.setState({ modelCatalog: MODELS, modelCatalogStatus: "ready" });
 
     render(<ModelSelectorButton />);
-    fireEvent.click(screen.getByText(Locale.Chat.ModelSelector.Default));
+    fireEvent.click(screen.getByText("Flash"));
+
+    expect(
+      screen.queryByRole("menuitem", {
+        name: Locale.Chat.ModelSelector.Default,
+      }),
+    ).not.toBeInTheDocument();
 
     // disabled 项可见,点击不触发 PATCH
     const disabledItem = screen.getByText("模型丙(停用)");
@@ -781,8 +787,10 @@ describe("V1.3-C FIX-01A:真实模型 label 仍正常展示", () => {
     );
     expect(screen.getByText("DeepSeek V3")).toBeInTheDocument();
     expect(
-      screen.getByText(Locale.Chat.ModelSelector.Default),
-    ).toBeInTheDocument();
+      screen.queryByRole("menuitem", {
+        name: Locale.Chat.ModelSelector.Default,
+      }),
+    ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("DeepSeek V3"));
     await tick();

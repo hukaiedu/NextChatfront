@@ -8,17 +8,17 @@ import { IconButton } from "./button";
 import styles from "./model-selector.module.scss";
 
 const RETRY_VALUE = "__retry_load_models__";
-const DEFAULT_VALUE = "";
+const DEFAULT_MODEL_KEY = "gemini-flash";
+const DEFAULT_MODEL_LABEL = "Flash";
 
 /**
  * M4:模型选择器(紧凑下拉框,现在 Composer 底部左侧)。
  *
  * - 会话模型偏好存在后端 Conversation.preferredModelKey,这里只读显示 + PATCH 保存
- * - null = 默认模型(默认选项,选中后 PATCH null 清除偏好,绝不伪造"默认"键)
+ * - null = 后端使用 Gemini Flash 默认模型;它不是一个可选的模型目录项
  * - 历史偏好键不在当前目录里 → 显示「当前模型不可用」,绝不自动清除(§十二)
  * - disabled 的模型项可见但不可选(§十一);在途 Request / 同会话正在保存期间整个按钮禁用(FIX-02)
- * - 目录来自 GET /api/provider/models;带偏好的会话进入聊天页即拉取以解析 label,
- *   其余会话首次打开时拉取,失败在列表里给重试项(§十六/§十七)
+ * - 目录来自 GET /api/provider/models;首次进入聊天页拉取,并用于显示默认 Flash 的实际 label
  */
 export function ModelSelectorButton(props: { dropUp?: boolean }) {
   const chatStore = useChatStore();
@@ -30,19 +30,12 @@ export function ModelSelectorButton(props: { dropUp?: boolean }) {
   const preferred = session.preferredModelKey ?? null;
   const busy = !!session.pendingRequestId;
 
-  // FIX-07:生成中不调 loadModels,避免命中 SERVICE_BUSY
+  // 目录是全局共享的;首次进入聊天页拉取,生成中则等到空闲再拉取。
   useEffect(() => {
-    if (preferred && catalogStatus === "idle" && !busy) {
+    if (catalogStatus === "idle" && !busy) {
       void chatStore.loadModels();
     }
-  }, [preferred, catalogStatus, chatStore, busy]);
-
-  // FIX-07:busy 从 true→false 时补拉(mount 时 busy=true 跳过了上面的 effect)
-  useEffect(() => {
-    if (!busy && preferred && catalogStatus === "idle") {
-      void chatStore.loadModels();
-    }
-  }, [busy]);
+  }, [catalogStatus, chatStore, busy]);
   const saving = chatStore.isModelSaving(session.id);
   const disabled = busy || saving;
   const tip = busy
@@ -54,9 +47,12 @@ export function ModelSelectorButton(props: { dropUp?: boolean }) {
   const preferredOption = preferred
     ? catalog.find((model) => model.key === preferred)
     : undefined;
+  const defaultOption =
+    catalog.find((model) => model.key === DEFAULT_MODEL_KEY) ??
+    catalog.find((model) => model.label.toLowerCase().includes("flash"));
   const label = preferred
     ? preferredOption?.label ?? Locale.Chat.ModelSelector.Unavailable
-    : Locale.Chat.ModelSelector.Default;
+    : defaultOption?.label ?? DEFAULT_MODEL_LABEL;
 
   const items =
     catalogStatus === "error"
@@ -66,36 +62,21 @@ export function ModelSelectorButton(props: { dropUp?: boolean }) {
             value: RETRY_VALUE,
             disable: false,
           },
-          {
-            title: Locale.Chat.ModelSelector.Default,
-            value: DEFAULT_VALUE,
-            disable: false,
-          },
         ]
-      : [
-          {
-            title: Locale.Chat.ModelSelector.Default,
-            value: DEFAULT_VALUE,
-            disable: false,
-          },
-          ...catalog.map((model) => ({
-            title: model.label,
-            value: model.key,
-            disable: model.disabled,
-          })),
-        ];
+      : catalog.map((model) => ({
+          title: model.label,
+          value: model.key,
+          disable: model.disabled,
+        }));
 
-  const currentValue = preferred ?? DEFAULT_VALUE;
+  const currentValue = preferred ?? defaultOption?.key ?? DEFAULT_MODEL_KEY;
 
   const handleSelection = (value: string) => {
     if (value === RETRY_VALUE) {
       void chatStore.loadModels(true);
       return;
     }
-    void chatStore.setSessionModel(
-      session.id,
-      value === DEFAULT_VALUE ? null : value,
-    );
+    void chatStore.setSessionModel(session.id, value);
   };
 
   return (
