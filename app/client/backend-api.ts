@@ -176,6 +176,8 @@ export async function callBackend<T>(
     method?: string;
     body?: unknown;
     headers?: Record<string, string>;
+    /** 组件卸载时取消在途请求(Admin 运维轮询使用) */
+    signal?: AbortSignal;
   } = {},
 ): Promise<T> {
   const response = await fetch(`${PREFIX}${path}`, {
@@ -187,6 +189,7 @@ export async function callBackend<T>(
       ...init.headers,
     },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: init.signal,
   });
 
   if (response.status === 204) {

@@ -5,38 +5,29 @@ import { describe, expect, test } from "@jest/globals";
  * V1.3-C Review FIX-01C(原任务 UI-07):运维信息只允许存在于 /admin 控制台,
  * 普通用户的设置页与聊天 UI 一律不得引用。
  *
- * 判据取真实词条与真实模块引用,而不是手写中文串:Locale.Browser.*(浏览器运维面板)、
- * Locale.AdminConsole.Provider.*(Provider 运维面板)、admin-api / store/browser 这两个
- * 只装运维字段的模块。同时在 /admin 侧做锚定断言,证明这是「挪进 Admin」而不是「删功能」。
- *
- * 说明:Settings 组件本身在本仓从未有过 jsdom 渲染先例(上游 persist store 在测试环境
- * 里水合时序不定),真机 DOM 扫描见 docs/V13C_REVIEW_FIX01_REPORT.md 的 FIX-01C 一节。
+ * 本轮后端已移除浏览器运行时:判据改为 Provider / Python Worker 运维面板,
+ * 并额外断言退役端点(`/admin/browser/*`、`/admin/provider/open`)在前端零引用。
  */
 
 const OPS_TOKENS = [
-  "Locale.Browser",
   "Locale.AdminConsole.Provider",
-  "AdminBrowserPanel",
   "AdminProviderSection",
   "../client/admin-api",
-  "../store/browser",
   "./admin-api",
-  "./store/browser",
 ];
 
 /** 后端运维字段名:普通 UI 连字符串都不该出现 */
 const RAW_FIELDS = [
-  "Browser Status",
-  "Restart Browser",
   "Provider Status",
   "Open Provider",
   "Restart Provider",
   "profileDir",
   "providerLoggedIn",
   "browserType",
-  "headless",
   "browser-profile",
   "GEMINI_WEB",
+  "admin/browser",
+  "provider/open",
 ];
 
 const PUBLIC_SOURCES = [
@@ -83,24 +74,38 @@ describe("FIX-01C:运维信息只在 Admin 面", () => {
       expect(source.includes("/admin/provider/")).toBe(false);
       expect(source.includes("/admin/sessions/")).toBe(false);
     }
-    // 锚定:运维请求确实存在,但只集中在 admin 客户端
-    expect(adminClient).toContain("/admin/browser/status");
+    // 锚定:Provider / Python Worker 运维请求确实存在,但只集中在 admin 客户端
     expect(adminClient).toContain("/admin/provider/status");
-    expect(adminClient).toContain("/admin/provider/open");
+    expect(adminClient).toContain("/admin/provider/check");
     expect(adminClient).toContain("/admin/provider/restart");
     expect(adminClient).toContain("/admin/sessions/revoke-all");
+    // 退役端点必须彻底消失
+    expect(adminClient.includes("/admin/browser/")).toBe(false);
+    expect(adminClient.includes("/admin/provider/open")).toBe(false);
   });
 
-  test("SETTINGS-03 运维面板只被 /admin 页面挂载", () => {
+  test("SETTINGS-03 运维面板只被 /admin 页面挂载,浏览器面板已删除", () => {
     const adminPage = read("app/admin/page.tsx");
-    expect(adminPage).toContain('from "../components/browser-status"');
     expect(adminPage).toContain("<AdminProviderSection");
+    expect(adminPage.includes("components/browser-status")).toBe(false);
 
     for (const file of PUBLIC_SOURCES) {
-      expect([file, /from "\.\.\/components\/browser-status"/.test(read(file))]).toEqual([
+      expect([
         file,
-        false,
-      ]);
+        /from "\.\.\/components\/browser-status"/.test(read(file)),
+      ]).toEqual([file, false]);
+    }
+  });
+
+  test("SETTINGS-04 /admin 不引用任何退役的浏览器运行时端点", () => {
+    const adminPage = read("app/admin/page.tsx");
+    const adminClient = read("app/client/admin-api.ts");
+
+    for (const source of [adminPage, adminClient]) {
+      expect(source.includes("/admin/browser/")).toBe(false);
+      expect(source.includes("/admin/provider/open")).toBe(false);
+      expect(source.includes("AdminBrowserPanel")).toBe(false);
+      expect(source.includes("useBrowserStore")).toBe(false);
     }
   });
 });

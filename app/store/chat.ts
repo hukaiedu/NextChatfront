@@ -170,7 +170,9 @@ export function getBotHello(): ChatMessage {
  * 未列出的码一律回落到通用文案,绝不把原始码渲染给用户(§39/§40)。
  */
 const ERROR_TEXT: Record<string, string> = {
-  CHAT_FAILED: "请求失败,请重试。",
+  // Public 面把凭据失效 / Provider 内部故障统一折进 CHAT_FAILED;
+  // 普通用户只应看到服务不可用与联系管理员,不暴露运维细节或操作命令。
+  CHAT_FAILED: "服务暂不可用，请联系管理员。",
   SERVICE_BUSY: "服务暂时繁忙,请稍后重试。",
   REQUEST_TIMEOUT: "请求超时,请重试。",
   CONVERSATION_LIMIT_REACHED: "会话存储数量已达到上限，请联系管理员。",
