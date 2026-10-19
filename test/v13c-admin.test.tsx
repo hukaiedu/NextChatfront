@@ -1,18 +1,20 @@
 import { jest } from "@jest/globals";
 import React from "react";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 
 // 先导入 store:组件经 store/index 形成循环依赖,先完成 store 求值可避免 Locale 未初始化
 import { resetAuthBootstrapState, useAuthStore } from "../app/store/auth";
-import { useBrowserStore, stopBrowserStatusPolling } from "../app/store/browser";
 import Locale from "../app/locales";
 
 /**
- * V1.3-C §49:Admin 控制台矩阵 C-ADMIN-01..08;FIX-01 补 Provider 运维 09..11。
+ * V1.3-C §49:Admin 控制台矩阵 C-ADMIN-01..08;FIX-01 补 Provider 运维。
  *
  * 从最外层伪造 HTTP,断言「路由可达性 + canonical URL + 身份守卫」:
  * /admin 与 /admin/login 都只做 session 探测,绝不顺带创建匿名身份(§17),
- * 运维请求只走 canonical /backend-api/admin/*(§22)。
+ * 运维请求只走 canonical /backend-api/admin/provider/*(§22)。
+ *
+ * 本轮后端已移除浏览器运行时:管理页不得再请求 /admin/browser/* 或
+ * /admin/provider/open,重启动作只重启 Python Worker。
  */
 
 const push = jest.fn();
@@ -28,18 +30,27 @@ jest.unstable_mockModule("next/navigation", () => ({
 
 let AdminConsolePage: React.ComponentType;
 let AdminLoginPage: React.ComponentType;
+let PROVIDER_POLL_INTERVAL_MS: number;
 
 const STAMP = "2026-09-12T00:00:00.000Z";
 const SESSION = "/backend-api/auth/session";
 const ANONYMOUS = "/backend-api/auth/anonymous";
 const LOGIN = "/backend-api/auth/login";
 const LOGOUT = "/backend-api/auth/logout";
-const BROWSER_STATUS = "/backend-api/admin/browser/status";
 const PROVIDER_STATUS = "/backend-api/admin/provider/status";
 const PROVIDER_CHECK = "/backend-api/admin/provider/check";
-const PROVIDER_OPEN = "/backend-api/admin/provider/open";
 const PROVIDER_RESTART = "/backend-api/admin/provider/restart";
 const REVOKE_ALL = "/backend-api/admin/sessions/revoke-all";
+
+/** 后端已退役、前端不得再访问的端点 */
+const RETIRED_URLS = [
+  "/backend-api/admin/provider/open",
+  "/backend-api/admin/browser/status",
+  "/backend-api/admin/browser/restart",
+  "/backend-api/browser/status",
+  "/backend-api/browser/restart",
+  "/backend-api/provider/open",
+];
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const settle = async () => {
@@ -77,18 +88,22 @@ function sessionData(authenticated: boolean, userType: string | null = null) {
     : { authenticated: false, expiresAt: null };
 }
 
-function browserSnapshot() {
+function authCheck(overrides: Record<string, unknown> = {}) {
   return {
-    state: "RUNNING",
-    browserType: "chromium",
-    headless: true,
-    profileDir: "data/browser-profile",
-    startedAt: STAMP,
-    uptimeMs: 60_000,
-    providerLoggedIn: true,
-    activeRequests: 0,
-    lastError: null,
-    observedAt: STAMP,
+    result: "MODEL_CATALOG_OK",
+    scope: "MODEL_CATALOG_ONLY",
+    checkedAt: STAMP,
+    modelCount: 3,
+    failureCode: null,
+    ...overrides,
+  };
+}
+
+function providerSnapshot(status = "READY", check?: Record<string, unknown>) {
+  return {
+    provider: "GEMINI_WEB",
+    status,
+    ...(check ? { authCheck: check } : {}),
   };
 }
 
@@ -96,10 +111,19 @@ function callsTo(url: string, method = "GET") {
   return calls.filter((c) => c.url === url && c.method === method);
 }
 
+function retiredCalls() {
+  return calls.filter((c) => RETIRED_URLS.includes(c.url));
+}
+
 /** 点击 ui-lib 确认弹窗里的「确认」或「取消」 */
 async function answerConfirm(accept: boolean) {
+  await answerConfirmAt(0, accept);
+}
+
+/** 页面上可能同时存在旧页面遗留的弹窗,按 DOM 顺序选择 */
+async function answerConfirmAt(index: number, accept: boolean) {
   await act(settle);
-  const mask = document.querySelector(".modal-mask");
+  const mask = document.querySelectorAll(".modal-mask")[index];
   expect(mask).toBeTruthy();
   const label = accept ? Locale.UI.Confirm : Locale.UI.Cancel;
   const button = Array.from(mask!.querySelectorAll("button")).find((el) =>
@@ -109,12 +133,26 @@ async function answerConfirm(accept: boolean) {
   await act(settle);
 }
 
+function modalCount() {
+  return document.querySelectorAll(".modal-mask").length;
+}
+
+function textCount(text: string) {
+  return (document.body.textContent ?? "").split(text).length - 1;
+}
+
 beforeAll(async () => {
-  AdminConsolePage = (await import("../app/admin/page")).default;
+  const page = await import("../app/admin/page");
+  AdminConsolePage = page.default;
+  PROVIDER_POLL_INTERVAL_MS = (
+    await import("../app/client/admin-api")
+  ).PROVIDER_STATUS_POLL_INTERVAL_MS;
   AdminLoginPage = (await import("../app/admin/login/page")).default;
 });
 
 beforeEach(() => {
+  // showConfirm 挂在 document.body,测试间清理遗留弹窗
+  document.querySelectorAll(".modal-mask").forEach((el) => el.remove());
   calls.length = 0;
   push.mockClear();
   replace.mockClear();
@@ -130,7 +168,6 @@ beforeEach(() => {
     logoutError: null,
   });
   resetAuthBootstrapState();
-  stopBrowserStatusPolling();
   localStorage.clear();
   (globalThis as any).fetch = jest.fn(
     async (input: string, init: RequestInit = {}) => {
@@ -146,12 +183,8 @@ beforeEach(() => {
 
 afterEach(() => {
   uninstallLocationStub();
-  stopBrowserStatusPolling();
+  jest.useRealTimers();
 });
-
-function providerSnapshot(status = "READY") {
-  return { provider: "GEMINI_WEB", status };
-}
 
 /**
  * 整页硬导航替身:jsdom 的 Location.replace 不可配置(`Object.defineProperty` 直接抛
@@ -184,8 +217,9 @@ function uninstallLocationStub() {
 function asAdmin() {
   route = (url) => {
     if (url === SESSION) return reply(200, { data: sessionData(true, "ADMIN") });
-    if (url === BROWSER_STATUS) return reply(200, { data: browserSnapshot() });
-    if (url === PROVIDER_STATUS) return reply(200, { data: providerSnapshot() });
+    if (url === PROVIDER_STATUS) {
+      return reply(200, { data: providerSnapshot() });
+    }
     return undefined;
   };
 }
@@ -200,24 +234,36 @@ describe("C-ADMIN /admin 身份守卫", () => {
 
     expect(replace).toHaveBeenCalledWith("/admin/login");
     expect(callsTo(ANONYMOUS, "POST")).toHaveLength(0);
-    expect(callsTo(BROWSER_STATUS)).toHaveLength(0);
-    expect(screen.queryByText(Locale.Browser.Title)).toBeNull();
+    expect(callsTo(PROVIDER_STATUS)).toHaveLength(0);
+    expect(retiredCalls()).toHaveLength(0);
+    expect(screen.queryByText(Locale.AdminConsole.Provider.Title)).toBeNull();
   });
 
-  test("C-ADMIN-02 匿名身份访问 /admin → 同样回登录页,且完全不碰运维端点", async () => {
+  test("C-ADMIN-02 匿名身份访问 /admin → 回登录页,不碰任何运维端点,也不显示管理员命令", async () => {
     route = (url) =>
-      url === SESSION ? reply(200, { data: sessionData(true, "ANONYMOUS") }) : undefined;
+      url === SESSION
+        ? reply(200, { data: sessionData(true, "ANONYMOUS") })
+        : undefined;
 
     render(React.createElement(AdminConsolePage));
     await act(settle);
 
     expect(replace).toHaveBeenCalledWith("/admin/login");
     expect(callsTo(ANONYMOUS, "POST")).toHaveLength(0);
-    expect(callsTo(BROWSER_STATUS)).toHaveLength(0);
     expect(callsTo(PROVIDER_STATUS)).toHaveLength(0);
+    expect(callsTo(PROVIDER_CHECK, "POST")).toHaveLength(0);
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(0);
+    expect(retiredCalls()).toHaveLength(0);
+    // 普通用户看不到管理员操作命令与凭据导入指引
+    expect(document.body.textContent ?? "").not.toContain(
+      Locale.AdminConsole.Provider.CredentialCommand,
+    );
+    expect(document.body.textContent ?? "").not.toContain(
+      Locale.AdminConsole.Provider.Restart,
+    );
   });
 
-  test("C-ADMIN-03 ADMIN 访问 /admin → 渲染控制台,运维请求只用 canonical 路径(§22/§50)", async () => {
+  test("C-ADMIN-03 ADMIN 访问 /admin → 渲染 Provider 控制台,不访问退役端点", async () => {
     asAdmin();
 
     render(React.createElement(AdminConsolePage));
@@ -225,23 +271,19 @@ describe("C-ADMIN /admin 身份守卫", () => {
 
     expect(replace).not.toHaveBeenCalled();
     expect(screen.getByText(Locale.AdminConsole.Title)).toBeTruthy();
-    expect(screen.getByText(Locale.Browser.Title)).toBeTruthy();
-    // 运维字段只出现在 Admin 面
-    expect(screen.getByText("data/browser-profile")).toBeTruthy();
-    expect(callsTo(BROWSER_STATUS)).toHaveLength(1);
-    // V1.3-C FIX-01:Provider 状态面板同样只用 canonical 路径
     expect(screen.getByText(Locale.AdminConsole.Provider.Title)).toBeTruthy();
-    expect(screen.getByText(Locale.Browser.LoggedIn.Yes)).toBeTruthy();
+    expect(
+      screen.getByText(Locale.AdminConsole.Provider.State.READY),
+    ).toBeTruthy();
     expect(callsTo(PROVIDER_STATUS)).toHaveLength(1);
-    const details = screen.getByText(Locale.AdminConsole.BrowserDetails).closest("details")!;
-    expect(details.hasAttribute("open")).toBe(false);
-    expect(screen.getAllByText(Locale.Browser.Fields.LoggedIn)).toHaveLength(1);
-    expect(
-      calls.some((c) => c.url === "/backend-api/provider/status"),
-    ).toBe(false);
-    expect(
-      calls.some((c) => c.url.startsWith("/backend-api/browser/")),
-    ).toBe(false);
+    expect(retiredCalls()).toHaveLength(0);
+
+    // 浏览器运行时展示已彻底移除
+    expect(screen.queryByText("浏览器详情（排障）")).toBeNull();
+    expect(screen.queryByText("用户配置文件")).toBeNull();
+    expect(screen.queryByText("打开登录窗口")).toBeNull();
+    expect(screen.queryByText("data/browser-profile")).toBeNull();
+    expect(screen.queryByText(Locale.AdminConsole.Provider.Restart)).toBeTruthy();
   });
 
   test("C-ADMIN-04 已 ADMIN 打开 /admin/login → 直接进控制台,不渲染表单", async () => {
@@ -327,8 +369,9 @@ describe("C-ADMIN 登录页", () => {
 function adminSurface(extra: MockRoute = () => undefined) {
   route = (url, method, body) => {
     if (url === SESSION) return reply(200, { data: sessionData(true, "ADMIN") });
-    if (url === BROWSER_STATUS) return reply(200, { data: browserSnapshot() });
-    if (url === PROVIDER_STATUS) return reply(200, { data: providerSnapshot() });
+    if (url === PROVIDER_STATUS) {
+      return reply(200, { data: providerSnapshot() });
+    }
     return extra(url, method, body);
   };
 }
@@ -395,64 +438,12 @@ describe("C-ADMIN 登录状态收口", () => {
   });
 });
 
-describe("C-ADMIN Provider 运维(FIX-01 补齐)", () => {
-  test("检查后同步浏览器登录态，浏览器关闭仍显示未运行", async () => {
-    let loggedIn = false;
-    route = (url, method) => {
-      if (url === SESSION)
-        return reply(200, { data: sessionData(true, "ADMIN") });
-      if (url === BROWSER_STATUS)
-        return reply(200, {
-          data: {
-            ...browserSnapshot(),
-            state: "STOPPED",
-            providerLoggedIn: loggedIn,
-          },
-        });
-      if (url === PROVIDER_STATUS)
-        return reply(200, {
-          data: providerSnapshot(loggedIn ? "READY" : "LOGIN_REQUIRED"),
-        });
-      if (url === PROVIDER_CHECK && method === "POST") {
-        loggedIn = true;
-        return reply(200, { data: providerSnapshot("READY") });
-      }
-      return undefined;
-    };
-    render(React.createElement(AdminConsolePage));
-    await act(settle);
-    expect(screen.getByText(Locale.Browser.LoggedIn.No)).toBeTruthy();
-    fireEvent.click(
-      screen.getByRole("button", { name: Locale.AdminConsole.Provider.Check }),
-    );
-    await act(settle);
-    expect(screen.getByText(Locale.Browser.LoggedIn.Yes)).toBeTruthy();
-    expect(screen.getByText(Locale.Browser.State.STOPPED)).toBeTruthy();
-    expect(callsTo(BROWSER_STATUS, "GET").length).toBeGreaterThan(1);
-    loggedIn = false;
-    await act(async () => {
-      await useBrowserStore.getState().refresh(true);
-      await settle();
-    });
-    expect(screen.getByText(Locale.Browser.LoggedIn.No)).toBeTruthy();
-    expect(screen.getByText(Locale.Browser.LoggedIn.No)).toBeTruthy();
-  });
-
-
-  test("C-ADMIN-12 手动检查登录态:只展示模型目录检查结果并走 Admin 接口", async () => {
+describe("C-ADMIN Provider / Python Worker 运维", () => {
+  test("C-ADMIN-12 手动检查连接/凭据:只展示模型目录检查结果并走 Admin 接口", async () => {
     adminSurface((url, method) =>
       url === PROVIDER_CHECK && method === "POST"
         ? reply(200, {
-            data: {
-              ...providerSnapshot(),
-              authCheck: {
-                result: "MODEL_CATALOG_OK",
-                scope: "MODEL_CATALOG_ONLY",
-                checkedAt: STAMP,
-                modelCount: 3,
-                failureCode: null,
-              },
-            },
+            data: providerSnapshot("READY", authCheck()),
           })
         : undefined,
     );
@@ -467,36 +458,51 @@ describe("C-ADMIN Provider 运维(FIX-01 补齐)", () => {
     await act(settle);
 
     expect(callsTo(PROVIDER_CHECK, "POST")).toHaveLength(1);
-    expect(screen.getByText(Locale.AdminConsole.Provider.CheckResult.MODEL_CATALOG_OK)).toBeTruthy();
-    expect(screen.getByText(Locale.AdminConsole.Provider.CheckDetails(3, new Date(STAMP).toLocaleString()))).toBeTruthy();
+    expect(
+      screen.getByText(Locale.AdminConsole.Provider.CheckResult.MODEL_CATALOG_OK),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        Locale.AdminConsole.Provider.CheckDetails(
+          3,
+          new Date(STAMP).toLocaleString(),
+        ),
+      ),
+    ).toBeTruthy();
+    // 只说明模型目录已验证,不能宣称聊天生成成功
+    expect(document.body.textContent ?? "").not.toContain("chat generation succeeded");
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.CheckTip,
+    );
     expect(replace).not.toHaveBeenCalled();
   });
 
-  test("C-ADMIN-09 打开 Provider:无二次确认,只发 canonical POST /admin/provider/open", async () => {
+  test("C-ADMIN-12A 检查失败:显示公开错误码的安全提示,不泄露后端 message", async () => {
     adminSurface((url, method) =>
-      url === PROVIDER_OPEN && method === "POST"
-        ? reply(200, { data: providerSnapshot("READY") })
+      url === PROVIDER_CHECK && method === "POST"
+        ? fail(500, "INTERNAL_ERROR", "raw backend detail")
         : undefined,
     );
 
     render(React.createElement(AdminConsolePage));
     await act(settle);
 
-    fireEvent.click(screen.getByText(Locale.AdminConsole.Provider.Open));
+    fireEvent.click(
+      screen.getByRole("button", { name: Locale.AdminConsole.Provider.Check }),
+    );
     await act(settle);
 
-    expect(callsTo(PROVIDER_OPEN, "POST")).toHaveLength(1);
-    // 旧 alias 已退役,不得再出现在前端调用面
-    expect(
-      calls.some((c) => c.url === "/backend-api/provider/open"),
-    ).toBe(false);
-    expect(replace).not.toHaveBeenCalled();
+    expect(callsTo(PROVIDER_CHECK, "POST")).toHaveLength(1);
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.CheckFailed("INTERNAL_ERROR"),
+    );
+    expect(document.body.textContent ?? "").not.toContain("raw backend detail");
   });
 
-  test("C-ADMIN-10 重启 Provider:确认弹窗取消 → 0 次写请求;确认 → 1 次 canonical POST", async () => {
+  test("C-ADMIN-13 重启 Python Worker:确认弹窗取消 → 0 次;确认 → 1 次 canonical POST", async () => {
     adminSurface((url, method) =>
       url === PROVIDER_RESTART && method === "POST"
-        ? reply(200, { data: providerSnapshot("STARTING") })
+        ? reply(200, { data: providerSnapshot("READY") })
         : undefined,
     );
 
@@ -515,19 +521,16 @@ describe("C-ADMIN Provider 运维(FIX-01 补齐)", () => {
     await answerConfirm(true);
 
     expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
-    expect(
-      calls.some((c) => c.url === "/backend-api/provider/restart"),
-    ).toBe(false);
-    // 重启结果直接采用后端返回值:状态从就绪切到「启动中」
-    expect(
-      screen.getByText(Locale.AdminConsole.Provider.State.STARTING),
-    ).toBeTruthy();
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.RestartSuccess,
+    );
+    expect(retiredCalls()).toHaveLength(0);
   });
 
-  test("C-ADMIN-11 有在飞 Request 时后端拒绝重启:Admin 面显示原始错误码且不跳转(§36)", async () => {
+  test("C-ADMIN-14 409 PROVIDER_RESTART_CONFLICT:提示稍后重试,不自动重复重启", async () => {
     adminSurface((url, method) =>
       url === PROVIDER_RESTART && method === "POST"
-        ? fail(503, "PROVIDER_NOT_READY", "Cannot restart while processing")
+        ? fail(409, "PROVIDER_RESTART_CONFLICT", "restart already in progress")
         : undefined,
     );
 
@@ -540,29 +543,350 @@ describe("C-ADMIN Provider 运维(FIX-01 补齐)", () => {
     await answerConfirm(true);
 
     expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
-    expect(document.body.textContent ?? "").toContain("PROVIDER_NOT_READY");
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.RestartConflict,
+    );
+    expect(document.body.textContent ?? "").not.toContain("已停止");
     expect(replace).not.toHaveBeenCalled();
-    expect(screen.getByText(Locale.AdminConsole.Title)).toBeTruthy();
+    expect(retiredCalls()).toHaveLength(0);
+  });
+
+  test("C-ADMIN-15 504 PROVIDER_RESTART_TIMEOUT:只提示等待超时,不提示已停止、不重复重启", async () => {
+    adminSurface((url, method) =>
+      url === PROVIDER_RESTART && method === "POST"
+        ? fail(504, "PROVIDER_RESTART_TIMEOUT", "restart wait timed out")
+        : undefined,
+    );
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(
+      screen.getAllByText(Locale.AdminConsole.Provider.Restart).at(-1)!,
+    );
+    await answerConfirm(true);
+    await act(settle);
+
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.RestartTimeout,
+    );
+    expect(document.body.textContent ?? "").not.toContain("已停止");
+    // 失败后允许回读一次状态,但绝不允许自动再次重启
+    expect(callsTo(PROVIDER_STATUS).length).toBeGreaterThanOrEqual(1);
+    expect(retiredCalls()).toHaveLength(0);
+  });
+
+  test("C-ADMIN-16 其他重启失败:按公开错误码展示安全提示", async () => {
+    adminSurface((url, method) =>
+      url === PROVIDER_RESTART && method === "POST"
+        ? fail(500, "PROVIDER_RESTART_FAILED", "worker spawn failed")
+        : undefined,
+    );
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(
+      screen.getAllByText(Locale.AdminConsole.Provider.Restart).at(-1)!,
+    );
+    await answerConfirm(true);
+
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.RestartFailed("PROVIDER_RESTART_FAILED"),
+    );
+    expect(document.body.textContent ?? "").not.toContain("worker spawn failed");
+  });
+
+  test("C-ADMIN-17 操作进行中禁用重复提交", async () => {
+    let resolveRestart: (value: any) => void = () => {};
+    const pending = new Promise((resolve) => {
+      resolveRestart = resolve;
+    });
+    adminSurface((url, method) => {
+      if (url === PROVIDER_RESTART && method === "POST") return pending;
+      return undefined;
+    });
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(
+      screen.getAllByText(Locale.AdminConsole.Provider.Restart).at(-1)!,
+    );
+    await answerConfirm(true);
+
+    const restartButton = screen.getByRole("button", {
+      name: Locale.AdminConsole.Provider.Restart,
+    });
+    expect(restartButton).toBeDisabled();
+    fireEvent.click(restartButton);
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+
+    await act(async () => {
+      resolveRestart(reply(200, { data: providerSnapshot("READY") }));
+      await settle();
+    });
+
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+    expect(restartButton).not.toBeDisabled();
+  });
+
+  test("C-ADMIN-18 凭据失效:管理员看到重新导入指引与准确的 CLI 命令", async () => {
+    route = (url) => {
+      if (url === SESSION) {
+        return reply(200, { data: sessionData(true, "ADMIN") });
+      }
+      if (url === PROVIDER_STATUS) {
+        return reply(200, {
+          data: providerSnapshot(
+            "LOGIN_REQUIRED",
+            authCheck({
+              result: "LOGIN_REQUIRED",
+              modelCount: null,
+              failureCode: "PROVIDER_LOGIN_REQUIRED",
+            }),
+          ),
+        });
+      }
+      return undefined;
+    };
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.CredentialTip,
+    );
+    expect(document.body.textContent ?? "").toContain(
+      Locale.AdminConsole.Provider.CredentialCommand,
+    );
+    expect(Locale.AdminConsole.Provider.CredentialCommand).toContain("--input");
+    // 不输出真实文件路径或凭据内容
+    expect(document.body.textContent ?? "").not.toContain("/Users/");
+    expect(document.body.textContent ?? "").not.toContain("__Secure-1PSID");
+  });
+
+  test("C-ADMIN-19 管理页全程不访问任何退役的浏览器运行时端点", async () => {
+    adminSurface((url, method) => {
+      if (url === PROVIDER_CHECK && method === "POST") {
+        return reply(200, { data: providerSnapshot("READY", authCheck()) });
+      }
+      if (url === PROVIDER_RESTART && method === "POST") {
+        return reply(200, { data: providerSnapshot("READY") });
+      }
+      return undefined;
+    });
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: Locale.AdminConsole.Provider.Check }),
+    );
+    await act(settle);
+    fireEvent.click(
+      screen.getAllByText(Locale.AdminConsole.Provider.Restart).at(-1)!,
+    );
+    await answerConfirm(true);
+
+    expect(retiredCalls()).toHaveLength(0);
+    expect(
+      calls.some(
+        (c) =>
+          c.url.includes("/admin/browser/") ||
+          c.url.includes("/admin/provider/open"),
+      ),
+    ).toBe(false);
   });
 });
 
-/**
- * V1.3-C FIX-02 身份边界(Admin surface)。
- *
- * C-IDSW-01「登录成功必须换文档」的判据在 C-ADMIN-05(同一条契约,不重复实现);
- * 这里补另外两个方向:失败与 COMPAT 都不得动身份,以及 Cookie 被别的 Tab 改掉之后
- * 本 Tab 重新活跃时必须复核。
- */
-async function submitPassword(password: string) {
-  fireEvent.change(
-    screen.getByPlaceholderText(Locale.AdminConsole.PasswordPlaceholder),
-    { target: { value: password } },
-  );
-  await act(async () => {
-    fireEvent.click(screen.getByText(Locale.AdminConsole.Submit));
-    await settle();
+describe("C-ADMIN 重启确认生命周期", () => {
+  function restartSurface() {
+    adminSurface((url, method) =>
+      url === PROVIDER_RESTART && method === "POST"
+        ? reply(200, { data: providerSnapshot("READY") })
+        : undefined,
+    );
+  }
+
+  function restartButton(container?: HTMLElement) {
+    const scope = container ? within(container) : screen;
+    return scope.getAllByText(Locale.AdminConsole.Provider.Restart).at(-1)!;
+  }
+
+  test("C-ADMIN-22 页面卸载后旧确认框不得发送 Worker 重启", async () => {
+    restartSurface();
+    const view = render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(restartButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+
+    const statusBefore = callsTo(PROVIDER_STATUS).length;
+    const successBefore = textCount(
+      Locale.AdminConsole.Provider.RestartSuccess,
+    );
+
+    view.unmount();
+    await answerConfirm(true);
+
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(0);
+    expect(callsTo(PROVIDER_STATUS).length).toBe(statusBefore);
+    expect(textCount(Locale.AdminConsole.Provider.RestartSuccess)).toBe(
+      successBefore,
+    );
   });
-}
+
+  test("C-ADMIN-23 确认框未结束时重复点击只保留一个确认流程", async () => {
+    restartSurface();
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(restartButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+
+    fireEvent.click(restartButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+
+    await answerConfirm(true);
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+    expect(modalCount()).toBe(0);
+  });
+
+  test("C-ADMIN-24 取消确认后释放占位,再次点击仍可正常重启", async () => {
+    restartSurface();
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(restartButton());
+    await answerConfirm(false);
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(0);
+    expect(modalCount()).toBe(0);
+
+    fireEvent.click(restartButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+    await answerConfirm(true);
+
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+  });
+
+  test("C-ADMIN-25 正常确认只发送一次 canonical Worker 重启", async () => {
+    restartSurface();
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    fireEvent.click(restartButton());
+    await answerConfirm(true);
+
+    const restarts = callsTo(PROVIDER_RESTART, "POST");
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0].url).toBe(PROVIDER_RESTART);
+  });
+
+  test("C-ADMIN-26 重新挂载后旧确认失效,且不清除新操作的占位", async () => {
+    restartSurface();
+    const first = render(React.createElement(AdminConsolePage));
+    await act(settle);
+    fireEvent.click(restartButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+
+    first.unmount();
+    const second = render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    // 新页面可以打开自己的确认框,旧弹窗仍留在 body 上
+    fireEvent.click(restartButton(second.container));
+    await act(settle);
+    expect(modalCount()).toBe(2);
+
+    // 确认旧弹窗:不得发送请求,也不得清掉新弹窗
+    await answerConfirmAt(0, true);
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(0);
+    expect(modalCount()).toBe(1);
+
+    // 新弹窗仍然有效,确认后只发送一次
+    await answerConfirmAt(0, true);
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+  });
+
+  test("C-ADMIN-27 StrictMode 生命周期重放后正常确认只发送一次", async () => {
+    restartSurface();
+    render(
+      <React.StrictMode>
+        <AdminConsolePage />
+      </React.StrictMode>,
+    );
+    await act(settle);
+
+    fireEvent.click(restartButton());
+    await answerConfirm(true);
+
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+  });
+});
+
+describe("C-ADMIN Provider 状态轮询", () => {
+  async function flushFakeTimers() {
+    for (let i = 0; i < 5; i += 1) {
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(0);
+      });
+    }
+  }
+
+  test("C-ADMIN-20 页面可见时按间隔刷新,组件卸载后无残留轮询", async () => {
+    jest.useFakeTimers();
+    asAdmin();
+
+    const view = render(React.createElement(AdminConsolePage));
+    await flushFakeTimers();
+
+    const initial = callsTo(PROVIDER_STATUS).length;
+    expect(initial).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(PROVIDER_POLL_INTERVAL_MS);
+    });
+    expect(callsTo(PROVIDER_STATUS).length).toBe(initial + 1);
+
+    view.unmount();
+    const afterUnmount = callsTo(PROVIDER_STATUS).length;
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(PROVIDER_POLL_INTERVAL_MS * 3);
+    });
+    expect(callsTo(PROVIDER_STATUS).length).toBe(afterUnmount);
+  });
+
+  test("C-ADMIN-21 页面隐藏时跳过轮询但不停表", async () => {
+    jest.useFakeTimers();
+    asAdmin();
+    const hidden = jest
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden");
+
+    const view = render(React.createElement(AdminConsolePage));
+    await flushFakeTimers();
+    const initial = callsTo(PROVIDER_STATUS).length;
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(PROVIDER_POLL_INTERVAL_MS);
+    });
+    expect(callsTo(PROVIDER_STATUS).length).toBe(initial);
+
+    hidden.mockRestore();
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(PROVIDER_POLL_INTERVAL_MS);
+    });
+    expect(callsTo(PROVIDER_STATUS).length).toBe(initial + 1);
+    view.unmount();
+  });
+});
 
 describe("FIX-02 身份切换与多 Tab(Admin surface)", () => {
   test("C-IDSW-02 登录 401:匿名身份与聊天数据原样保留,不换文档", async () => {
@@ -623,8 +947,9 @@ describe("FIX-02 身份切换与多 Tab(Admin surface)", () => {
     let probe = sessionData(true, "ADMIN");
     route = (url) => {
       if (url === SESSION) return reply(200, { data: probe });
-      if (url === BROWSER_STATUS) return reply(200, { data: browserSnapshot() });
-      if (url === PROVIDER_STATUS) return reply(200, { data: providerSnapshot() });
+      if (url === PROVIDER_STATUS) {
+        return reply(200, { data: providerSnapshot() });
+      }
       return undefined;
     };
 
@@ -665,8 +990,9 @@ describe("FIX-02 身份切换与多 Tab(Admin surface)", () => {
     let probe = reply(200, { data: sessionData(true, "ADMIN") });
     route = (url) => {
       if (url === SESSION) return probe;
-      if (url === BROWSER_STATUS) return reply(200, { data: browserSnapshot() });
-      if (url === PROVIDER_STATUS) return reply(200, { data: providerSnapshot() });
+      if (url === PROVIDER_STATUS) {
+        return reply(200, { data: providerSnapshot() });
+      }
       return undefined;
     };
 
@@ -687,3 +1013,14 @@ describe("FIX-02 身份切换与多 Tab(Admin surface)", () => {
     ).toBeTruthy();
   });
 });
+
+async function submitPassword(password: string) {
+  fireEvent.change(
+    screen.getByPlaceholderText(Locale.AdminConsole.PasswordPlaceholder),
+    { target: { value: password } },
+  );
+  await act(async () => {
+    fireEvent.click(screen.getByText(Locale.AdminConsole.Submit));
+    await settle();
+  });
+}

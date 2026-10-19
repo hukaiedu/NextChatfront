@@ -73,12 +73,10 @@ app/
 │  └─ admin-api.ts          # canonical /backend-api/admin/* 运维调用
 ├─ store/
 │  ├─ chat.ts               # 前端会话状态与 Backend 数据同步
-│  ├─ auth.ts               # 身份 session 真相(服务端为准)+ 登录 / 退出 / 吊销
-│  └─ browser.ts            # 浏览器状态快照 + 共享轮询定时器
+│  └─ auth.ts               # 身份 session 真相(服务端为准)+ 登录 / 退出 / 吊销
 ├─ components/
 │  ├─ chat.tsx              # 聊天主界面
 │  ├─ sidebar.tsx           # 会话列表 / 归档切换
-│  ├─ browser-status.tsx    # /admin 用的服务端浏览器面板(展示层)
 │  └─ settings.tsx          # 设置页(无运维面板)
 ├─ admin/
 │  ├─ page.tsx              # /admin 管理控制台(ADMIN only)
@@ -94,9 +92,8 @@ next.config.mjs             # /backend-api/* rewrite 规则
 - `admin-api.ts`:运维调用与 Public 聊天调用物理分开,类型独立,不共享 DTO。
 - `chat.ts`:会话状态机(草稿 / 已加载 / 在途 Request / 归档),与 Backend 数据同步。
 - `auth.ts`:身份只由 `GET /backend-api/auth/session` 决定,本地不落任何凭证。
-- `browser.ts`:浏览器状态快照、重启动作与引用计数的共享轮询(展示位只有一份 15s 轮询)。
+- `admin/page.tsx`:Provider 状态 / 凭据检查 / Python Worker 重启,只在 ADMIN 面渲染。
 - `next.config.mjs`:`/backend-api/*` 同源代理。
-- `docs/browser-status-api.md`:浏览器状态接口的后端实现规格(交后端 Agent 的交付文档)。
 
 > 原 NextChat 的多 Provider 客户端(`app/client/platforms/*`、`app/client/api.ts`)仍在仓库中,但已不参与聊天链路,仅为残留代码。
 
@@ -209,7 +206,7 @@ Conversation、Message、Request 全部来自 personChat Backend:
 - 发送消息:`POST /backend-api/conversations/:id/messages`(带 `Idempotency-Key`)
 - 停止生成:`POST /backend-api/requests/:id/cancel`
 - 事件流:`GET /backend-api/requests/:id/events`(SSE)
-- 服务端浏览器状态:不属于聊天主数据,只在 `/admin` 管理控制台按 canonical 路径读取(见「服务端浏览器管理(V1.3-C)」一节)
+- 服务端 Provider / Python Worker 状态:不属于聊天主数据,只在 `/admin` 管理控制台按 canonical 路径读取(见「管理控制台与 Python Worker(V1.3-C)」一节)
 
 Frontend **不再将本地 IndexedDB / localStorage 中的聊天记录视为权威数据**。数据库恢复、刷新恢复都以后端为准。
 
@@ -221,7 +218,7 @@ Frontend **不再将本地 IndexedDB / localStorage 中的聊天记录视为权�
 | Mask(角色预设) | localStorage | `chat-next-web-mask` |
 | Prompt 资源 | localStorage | `chat-next-web-prompt` |
 | 未发送输入 | localStorage | `unfinished-input-<会话 id>`(仅草稿文本,切换会话时恢复) |
-| 服务端浏览器状态快照 | 内存 | 每次进入页面重新拉取,不落盘 |
+| 服务端 Provider 状态 | 组件内存 | 每次进入页面重新拉取,不落盘 |
 | 登录身份 / Session | HttpOnly Cookie + 内存 store | 前端代码不读 Cookie、不落盘,身份真相只来自 `GET /backend-api/auth/session` |
 | 聊天数据(旧 `chat-next-web-store`) | 不持久化 | 启动时主动清除 |
 
@@ -258,20 +255,18 @@ POST /backend-api/conversations/:id/messages(得到 Request)
 - **stale key 安全**:历史偏好键不在当前目录时,按钮显示「当前模型不可用」,**不自动清除偏好**;此时发送会被后端判 `PROVIDER_MODEL_UNAVAILABLE`(内部码,Request 终态 FAILED),Public 信封只回 `CHAT_FAILED`,气泡显示通用错误文案,偏好保持不变。
 - **偏好持久化唯一来源是后端**:localStorage 不存任何模型偏好;页面刷新后偏好与会话历史均从 Backend 恢复。
 
-## 管理控制台与服务端浏览器(V1.3-C)
+## 管理控制台与 Python Worker(V1.3-C)
 
 `/admin`(App Router 真实路由,**不是** HashRouter 里的 `#/…`)是唯一的管理界面;未登录 ADMIN 时跳 `/admin/login` 只输密码。聊天侧栏与设置页不再有运维面板。
 
 - **身份真相**:只来自 `GET /backend-api/auth/session`(HttpOnly Cookie 由浏览器自动携带,前端代码从不读 Cookie);管理员密码不写 localStorage / sessionStorage,不进 URL,不打日志。
-- **canonical 路径**:浏览器状态走 `GET /backend-api/admin/browser/status`,重启走 `POST /backend-api/admin/browser/restart`;Provider 状态 / 打开 / 重启走 `GET /backend-api/admin/provider/status`、`POST /backend-api/admin/provider/open`、`POST /backend-api/admin/provider/restart`(旧 `/backend-api/browser/*`、`/backend-api/provider/status` 等已随后端 alias 退役)。
-- **面板内容**:当前身份与登录状态有效期、浏览器 `state` / 启动时间 / 已运行时长 / 类型 / profileDir / Gemini 登录态 / 进行中的回答 / 最近错误 / 状态更新时间。
-- **Provider 面板**:`state` 取 `STOPPED` / `STARTING` / `LOGIN_REQUIRED` / `READY` / `BUSY` / `ERROR`;只在进入页面时拉一次,靠「刷新」手动更新(不参与上面的 15s 轮询);「打开 Provider」只把后端浏览器页面切到前台,不确认、不写数据;「重启 Provider」先确认再执行,后端以原始错误码拒绝时(如 `503 PROVIDER_NOT_READY`)原样展示,不跳转、不降级成通用文案。
-- **轮询**:挂载时立即拉一次,之后每 15s 一次;页面隐藏时跳过本轮但不停表,切回前台即恢复新鲜度。
-- **逐字段降级**:除 `state` 外全部可选,后端缺哪个字段该行就显示 `—`;首帧之前显示「未知」。
-- **错误区分**:网络错误按 HTTP 状态分流,`404` 视为「后端尚未提供 canonical Admin API,请升级 personChat Backend」,与「连不上后端服务」分开;拉取失败时保留上一次快照不清空。
-- **危险操作一律先确认**:重启(提示会中断正在进行的回答)、吊销全部登录状态(`POST /backend-api/admin/sessions/revoke-all`,提示不可撤销,成功后当前 Cookie 失效并回登录页)、退出管理员登录(只注销当前设备)。
-- **不落本地**:浏览器状态与登录态只存在于内存 store,localStorage 不写任何浏览器状态或会话数据。
-- **后端规格**:`docs/browser-status-api.md`(字段语义、状态机、`BROWSER_*` 内部错误码、并发约束与验收清单)。
+- **canonical 路径**:Provider 状态 / 检查 / 重启只走 `GET /backend-api/admin/provider/status`、`POST /backend-api/admin/provider/check`、`POST /backend-api/admin/provider/restart`;后端已退役的 `/backend-api/admin/browser/*` 与 `/backend-api/admin/provider/open` 前端零引用。
+- **Provider 面板**:状态取后端实际支持的 `READY` / `BUSY` / `LOGIN_REQUIRED`;「检查连接/凭据」只验证模型目录,不代表聊天生成已验证;「重启 Python Worker」先确认再执行。
+- **凭据失效**:管理员看到「请在后端重新导入 Gemini 凭据,再检查连接」及 `yarn gemini-auth import --input <凭据文件>`;普通用户只看到服务暂不可用、请联系管理员,不展示任何管理员命令。
+- **重启错误**:`409 PROVIDER_RESTART_CONFLICT` 提示稍后重试;`504 PROVIDER_RESTART_TIMEOUT` 只表示 HTTP 等待超时,后台可能仍在重启,前端不提示已停止、不自动重复重启;其他失败按后端公开错误码给出安全提示。
+- **轮询**:进入页面拉一次,之后每 15s 一次;页面隐藏时跳过本轮,组件卸载时清除定时器并中止在途请求。
+- **危险操作一律先确认**:重启 Python Worker、吊销全部登录状态(`POST /backend-api/admin/sessions/revoke-all`,提示不可撤销,成功后当前 Cookie 失效并回登录页)、退出管理员登录(只注销当前设备)。
+- **不落本地**:Provider 状态只存在于组件内存,localStorage 不写任何运维状态或会话数据。
 
 ## 图片附件(V1.2)
 
@@ -354,11 +349,11 @@ Request 进入 CANCELLING
 
 前端只消费后端 **Public 信封**的错误码(V1.3-C 契约):内部实现码(`PROVIDER_*`、`BROWSER_*`、`DATABASE_ERROR`、`INTERNAL_ERROR` …)在 HTTP 响应体、SSE 帧与 DTO 里都已折成通用码,前端码表因此**不含任何内部码**——出现 `PROVIDER_*` 就说明 Public 契约漏了细节。
 
-映射唯一来源:`app/store/chat.ts` 的 `ERROR_TEXT` + `errorTextForCode()` / `backendErrorMessage()`。**未列出的码一律回落到 `请求失败,请重试。`,绝不把后端原始 code 或 message 渲染给用户。**
+映射唯一来源:`app/store/chat.ts` 的 `ERROR_TEXT` + `errorTextForCode()` / `backendErrorMessage()`。**未列出的码一律回落到 `服务暂不可用，请联系管理员。`,绝不把后端原始 code 或 message 渲染给用户。**
 
 | 错误码 | 用户文案 |
 | --- | --- |
-| `CHAT_FAILED` | 请求失败,请重试。(也是未知码的兜底) |
+| `CHAT_FAILED` | 服务暂不可用，请联系管理员。(也是未知码的兜底) |
 | `SERVICE_BUSY` | 服务暂时繁忙,请稍后重试。 |
 | `REQUEST_TIMEOUT` | 请求超时,请重试。 |
 | `CONVERSATION_NOT_FOUND` | 会话不存在 |
@@ -378,7 +373,7 @@ Request 进入 CANCELLING
 | `NETWORK_ERROR` | 网络异常,请稍后重试(前端本地生成,表示连不上后端) |
 
 - `CANCELLED` 不是错误码:用户主动停止时正常展示已生成内容。
-- 「模型不可用」「服务端浏览器未运行」等运维细节改由 `/admin` 管理控制台呈现,聊天界面只给上面的通用文案。
+- 「模型不可用」「凭据失效」「Worker 未就绪」等运维细节改由 `/admin` 管理控制台呈现,聊天界面只给上面的通用文案。
 
 ## 旧接口与旧能力
 
@@ -438,9 +433,9 @@ Backend:
 ## 已知限制
 
 - **Backend 依赖**:没有 personChat Backend,前端无法聊天。
-- **共享 Provider 账号**:V1.4 已有 REGISTERED 用户与 User.id ownership/quota 隔离,但所有用户共享 Backend、Browser Profile 与 Google/Gemini 登录态;Browser Pool 与多 Gemini Account 不在本版本。
-- **发布闸门**:**READY FOR PRODUCTION RELEASE REVIEW, NOT DEPLOYED** —— 发布前仍需 backup、真实 DB 指纹复核、`prisma migrate deploy`、production env/Nginx 核验、计划中的真实 Gemini smoke 与 post-deploy auth/browser smoke。
-- **Gemini 人工登录**:Gemini 登录态由 Backend Browser Profile 提供,前端无法处理登录。
+- **共享 Provider 账号**:V1.4 已有 REGISTERED 用户与 User.id ownership/quota 隔离,但所有用户共享 Backend 与 Google/Gemini 凭据;多 Gemini Account 不在本版本。
+- **发布闸门**:**READY FOR PRODUCTION RELEASE REVIEW, NOT DEPLOYED** —— 发布前仍需 backup、真实 DB 指纹复核、`prisma migrate deploy`、production env/Nginx 核验、计划中的真实 Gemini smoke 与 post-deploy auth/provider smoke。
+- **Gemini 凭据**:Gemini 凭据通过后端 CLI(`yarn gemini-auth import --input <文件>`)导入,前端不读取 Cookie、不提供上传入口。
 - **Gemini DOM 依赖**:Gemini Web 页面改版会影响 Backend 自动化。
 - **单实例**:Backend 当前为单实例架构。
 - **RATE_LIMITED**:该错误码当前无可靠的真实检测。

@@ -368,18 +368,6 @@ function route(call: RecordedCall) {
   if (method === "GET" && listMatch) {
     return messagePage(listMatch[1], new URLSearchParams(listMatch[2]));
   }
-  if (method === "GET" && url === "/backend-api/browser/status") {
-    return reply(200, {
-      data: {
-        state: "RUNNING",
-        browserType: "chromium",
-        headless: true,
-        providerLoggedIn: true,
-        activeRequests: 0,
-        observedAt: STAMP,
-      },
-    });
-  }
   if (method === "GET" && url === "/backend-api/provider/models") {
     return reply(200, { data: { models: [], currentModelKey: null } });
   }

@@ -745,7 +745,7 @@ describe("第 7 阶段:NextChat 以 Backend API 为唯一聊天数据源", () =>
     expect(failed.streaming).toBe(false);
     expect(failed.isError).toBe(true);
     expect(failed.errorCode).toBe("CHAT_FAILED");
-    expect(errorTextForCode(failed.errorCode)).toBe("请求失败,请重试。");
+    expect(errorTextForCode(failed.errorCode)).toBe("服务暂不可用，请联系管理员。");
   });
 
   test("⑤ 刷新后从后端恢复历史消息", async () => {
@@ -4760,7 +4760,7 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
   const TERMINAL_ERROR_CODES: { code: string; text: string }[] = [
     {
       code: "CHAT_FAILED",
-      text: "请求失败,请重试。",
+      text: "服务暂不可用，请联系管理员。",
     },
     {
       code: "REQUEST_TIMEOUT",
