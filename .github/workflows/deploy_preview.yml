@@ -1,9 +1,11 @@
-name: VercelPreviewDeployment
+# Disabled: Vercel preview deployments are not used by personChat.
+# Do not restore pull_request_target here: it ran PR-head code with Vercel
+# secrets. If previews are needed again, use a manually approved environment
+# and never execute an untrusted PR checkout with secrets.
+name: VercelPreviewDeployment (disabled)
 
 on:
-  pull_request_target:
-    types:
-      - review_requested
+  workflow_dispatch:
 
 env:
   VERCEL_TEAM: ${{ secrets.VERCEL_TEAM }}
@@ -19,6 +21,7 @@ permissions:
 
 jobs:
   deploy-preview:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2

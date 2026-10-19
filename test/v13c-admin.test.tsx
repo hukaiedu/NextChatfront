@@ -58,6 +58,14 @@ const settle = async () => {
   await tick();
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 interface RecordedCall {
   url: string;
   method: string;
@@ -1011,6 +1019,305 @@ describe("FIX-02 身份切换与多 Tab(Admin surface)", () => {
     expect(
       screen.getByText(Locale.AdminConsole.Session.Title),
     ).toBeTruthy();
+  });
+});
+
+describe("C-ADMIN 生命周期收敛与请求竞态", () => {
+  test("C-ADMIN-28 Provider 401 后立即回登录页", async () => {
+    let statusReply: any = reply(200, { data: providerSnapshot() });
+    route = (url) => {
+      if (url === SESSION) {
+        return reply(200, { data: sessionData(true, "ADMIN") });
+      }
+      if (url === PROVIDER_STATUS) return statusReply;
+      return undefined;
+    };
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+    expect(
+      screen.getByText(Locale.AdminConsole.Provider.State.READY),
+    ).toBeTruthy();
+
+    statusReply = fail(401, "AUTH_REQUIRED", "expired");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: Locale.AdminConsole.Provider.Refresh,
+      }),
+    );
+    await act(settle);
+
+    expect(replace).toHaveBeenCalledWith("/admin/login");
+    expect(screen.queryByText(Locale.AdminConsole.Provider.Restart)).toBeNull();
+  });
+
+  test("C-ADMIN-28A Provider 403 AUTH_FORBIDDEN 后立即回登录页", async () => {
+    let statusReply: any = reply(200, { data: providerSnapshot() });
+    route = (url) => {
+      if (url === SESSION) {
+        return reply(200, { data: sessionData(true, "ADMIN") });
+      }
+      if (url === PROVIDER_STATUS) return statusReply;
+      return undefined;
+    };
+
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+    statusReply = fail(403, "AUTH_FORBIDDEN", "administrator required");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: Locale.AdminConsole.Provider.Refresh,
+      }),
+    );
+    await act(settle);
+
+    expect(replace).toHaveBeenCalledWith("/admin/login");
+    expect(screen.queryByText(Locale.AdminConsole.Provider.Restart)).toBeNull();
+  });
+
+  test("C-ADMIN-29 auth store 身份降为非 ADMIN 时立即回登录页", async () => {
+    adminSurface();
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+
+    act(() => {
+      useAuthStore.setState({ status: "authenticated", userType: "ADMIN" });
+    });
+    act(() => {
+      useAuthStore.setState({ status: "authenticated", userType: "ANONYMOUS" });
+    });
+    await act(settle);
+
+    expect(replace).toHaveBeenCalledWith("/admin/login");
+  });
+
+  test("C-ADMIN-30 卸载后旧的焦点复核不得清身份或跳转", async () => {
+    const pending = deferred<any>();
+    let sessionCount = 0;
+    route = (url) => {
+      if (url === SESSION) {
+        sessionCount += 1;
+        if (sessionCount === 1) {
+          return reply(200, { data: sessionData(true, "ADMIN") });
+        }
+        return pending.promise;
+      }
+      if (url === PROVIDER_STATUS) {
+        return reply(200, { data: providerSnapshot() });
+      }
+      return undefined;
+    };
+
+    const view = render(React.createElement(AdminConsolePage));
+    await act(settle);
+    await act(async () => {
+      useAuthStore.setState({
+        status: "authenticated",
+        userType: "ADMIN",
+        expiresAt: STAMP,
+      });
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await settle();
+    });
+    expect(sessionCount).toBe(2);
+
+    view.unmount();
+    await act(async () => {
+      pending.resolve(reply(200, { data: sessionData(false) }));
+      await settle();
+    });
+
+    expect(replace).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().userType).toBe("ADMIN");
+  });
+
+  test("C-ADMIN-31 被中止的旧轮询不得覆盖重启后的状态", async () => {
+    jest.useFakeTimers();
+    const stale = deferred<any>();
+    const restart = deferred<any>();
+    let statusCalls = 0;
+    route = (url) => {
+      if (url === SESSION) {
+        return reply(200, { data: sessionData(true, "ADMIN") });
+      }
+      if (url === PROVIDER_STATUS) {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          return reply(200, { data: providerSnapshot("READY") });
+        }
+        if (statusCalls === 2) return stale.promise;
+        return reply(200, { data: providerSnapshot("READY") });
+      }
+      if (url === PROVIDER_RESTART) return restart.promise;
+      return undefined;
+    };
+    const settleFake = async () => {
+      for (let i = 0; i < 5; i += 1) {
+        await act(async () => {
+          await jest.advanceTimersByTimeAsync(0);
+        });
+      }
+    };
+
+    render(React.createElement(AdminConsolePage));
+    await settleFake();
+    expect(
+      screen.getByText(Locale.AdminConsole.Provider.State.READY),
+    ).toBeTruthy();
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(PROVIDER_POLL_INTERVAL_MS);
+    });
+    await settleFake();
+    expect(statusCalls).toBe(2);
+
+    fireEvent.click(
+      screen.getAllByText(Locale.AdminConsole.Provider.Restart).at(-1)!,
+    );
+    await settleFake();
+    expect(modalCount()).toBe(1);
+    const mask = document.querySelectorAll(".modal-mask")[0]!;
+    const confirmButton = Array.from(mask.querySelectorAll("button")).find(
+      (el) => (el.textContent ?? "").includes(Locale.UI.Confirm),
+    );
+    fireEvent.click(confirmButton!);
+    await settleFake();
+    expect(callsTo(PROVIDER_RESTART, "POST")).toHaveLength(1);
+
+    await act(async () => {
+      restart.resolve(reply(200, { data: providerSnapshot("BUSY") }));
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    await settleFake();
+    expect(
+      screen.getByText(Locale.AdminConsole.Provider.State.BUSY),
+    ).toBeTruthy();
+
+    await act(async () => {
+      stale.resolve(reply(200, { data: providerSnapshot("READY") }));
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    await settleFake();
+    expect(
+      screen.getByText(Locale.AdminConsole.Provider.State.BUSY),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(Locale.AdminConsole.Provider.State.READY),
+    ).toBeNull();
+  });
+
+  test("C-ADMIN-32 吊销确认重复点击只保留一个，卸载后确认不得发送请求", async () => {
+    adminSurface((url, method) =>
+      url === REVOKE_ALL && method === "POST"
+        ? reply(200, { data: { revoked: 1 } })
+        : undefined,
+    );
+    const view = render(React.createElement(AdminConsolePage));
+    await act(settle);
+    const revokeButton = () =>
+      screen.getAllByText(Locale.AdminConsole.Sessions.RevokeAll).at(-1)!;
+
+    fireEvent.click(revokeButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+    fireEvent.click(revokeButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+    await answerConfirm(false);
+    expect(callsTo(REVOKE_ALL, "POST")).toHaveLength(0);
+
+    fireEvent.click(revokeButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+    view.unmount();
+    await answerConfirm(true);
+
+    expect(callsTo(REVOKE_ALL, "POST")).toHaveLength(0);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  test("C-ADMIN-33 退出确认重复点击只保留一个，卸载后确认不得发送请求", async () => {
+    adminSurface((url, method) =>
+      url === LOGOUT && method === "POST" ? reply(204) : undefined,
+    );
+    const view = render(React.createElement(AdminConsolePage));
+    await act(settle);
+    const logoutButton = () =>
+      screen.getAllByText(Locale.AdminConsole.Logout.Title).at(-1)!;
+
+    fireEvent.click(logoutButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+    fireEvent.click(logoutButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+    await answerConfirm(false);
+    expect(callsTo(LOGOUT, "POST")).toHaveLength(0);
+
+    fireEvent.click(logoutButton());
+    await act(settle);
+    expect(modalCount()).toBe(1);
+    view.unmount();
+    await answerConfirm(true);
+
+    expect(callsTo(LOGOUT, "POST")).toHaveLength(0);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  test("C-ADMIN-34 吊销确认期间身份失效且未卸载时确认不得发送请求", async () => {
+    adminSurface((url, method) =>
+      url === REVOKE_ALL && method === "POST"
+        ? reply(200, { data: { revoked: 1 } })
+        : undefined,
+    );
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+    await act(async () => {
+      useAuthStore.setState({ status: "authenticated", userType: "ADMIN" });
+    });
+    fireEvent.click(
+      screen.getAllByText(Locale.AdminConsole.Sessions.RevokeAll).at(-1)!,
+    );
+    await act(settle);
+    expect(modalCount()).toBe(1);
+
+    await act(async () => {
+      useAuthStore.setState({ status: "authenticated", userType: "ANONYMOUS" });
+    });
+    await act(settle);
+    // The mocked router does not unmount the page; the dialog is still mounted.
+    expect(modalCount()).toBe(1);
+
+    await answerConfirm(true);
+    expect(callsTo(REVOKE_ALL, "POST")).toHaveLength(0);
+  });
+
+  test("C-ADMIN-35 退出确认期间身份失效且未卸载时确认不得发送请求", async () => {
+    adminSurface((url, method) =>
+      url === LOGOUT && method === "POST" ? reply(204) : undefined,
+    );
+    render(React.createElement(AdminConsolePage));
+    await act(settle);
+    await act(async () => {
+      useAuthStore.setState({ status: "authenticated", userType: "ADMIN" });
+    });
+    fireEvent.click(
+      screen.getAllByText(Locale.AdminConsole.Logout.Title).at(-1)!,
+    );
+    await act(settle);
+    expect(modalCount()).toBe(1);
+
+    await act(async () => {
+      useAuthStore.setState({ status: "authenticated", userType: "ANONYMOUS" });
+    });
+    await act(settle);
+    expect(modalCount()).toBe(1);
+
+    await answerConfirm(true);
+    expect(callsTo(LOGOUT, "POST")).toHaveLength(0);
   });
 });
 

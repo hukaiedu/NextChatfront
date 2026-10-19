@@ -1,0 +1,9 @@
+# Deployment inputs must stay LF on every checkout. Keep these rules narrow:
+# normalizing the whole repository would create unrelated line-ending diffs.
+scripts/cd/*.sh text eol=lf
+scripts/cd/*.mjs text eol=lf
+.github/workflows/*.yml text eol=lf
+deploy/*.md text eol=lf
+deploy/frontend.env.example text eol=lf
+deploy/systemd/*.service.example text eol=lf
+deploy/nginx/*.conf.example text eol=lf

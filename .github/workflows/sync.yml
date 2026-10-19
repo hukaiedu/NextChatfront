@@ -1,18 +1,18 @@
-name: Upstream Sync
+# Disabled: upstream sync must not write main outside a reviewed PR.
+# Re-enable only with a PR-based sync flow; do not restore a direct main push.
+name: Upstream Sync (disabled)
 
 permissions:
-  contents: write
+  contents: read
 
 on:
-  schedule:
-    - cron: "0 0 * * *" # every day
   workflow_dispatch:
 
 jobs:
   sync_latest_from_upstream:
     name: Sync latest commits from upstream repo
     runs-on: ubuntu-latest
-    if: ${{ github.event.repository.fork }}
+    if: ${{ false }}
 
     steps:
       # Step 1: run a standard checkout action

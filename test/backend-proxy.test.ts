@@ -73,6 +73,7 @@ describe("runtime backend proxy", () => {
           "Idempotency-Key": "web-test-key",
           Host: "front.test",
           "X-Forwarded-Host": "attacker.test",
+          "Accept-Encoding": "gzip, br",
         },
         body: JSON.stringify({ content: "hello" }),
       }),
@@ -91,6 +92,9 @@ describe("runtime backend proxy", () => {
     expect(headers.get("idempotency-key")).toBe("web-test-key");
     expect(headers.get("host")).toBeNull();
     expect(headers.get("x-forwarded-host")).toBeNull();
+    // The browser's encoding preferences must not reach the upstream; fetch
+    // decodes the body and the response must not carry stale entity headers.
+    expect(headers.get("accept-encoding")).toBe("identity");
     expect(proxyInit?.duplex).toBeUndefined();
     expect(await new globalThis.Response(init?.body).text()).toBe(
       JSON.stringify({ content: "hello" }),

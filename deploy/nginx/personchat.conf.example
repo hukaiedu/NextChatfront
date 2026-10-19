@@ -1,0 +1,89 @@
+# Production topology:
+#   Browser -> Nginx TLS
+#     /backend-api/ -> Backend /api/ directly (127.0.0.1:3010)
+#     everything else -> Next.js (127.0.0.1:3000)
+#
+# Both applications listen on loopback; do not expose 3000/3010 publicly.
+# Install as /etc/nginx/sites-available/personchat.conf and adjust the
+# server_name and certificate paths. The backend must use
+# AUTH_ALLOWED_ORIGINS=https://<public-origin> and AUTH_TRUST_PROXY=true.
+#
+# The Next runtime proxy (/backend-api/[...path]/route.ts + BACKEND_ORIGIN) is
+# intentionally not in this public path. It is used for local/direct-port
+# access and for the deployment loopback health check.
+
+server {
+    listen 80;
+    server_name chat.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    # Ubuntu 22.04's Nginx 1.18 uses the listen parameter form.
+    listen 443 ssl http2;
+    server_name chat.example.com;
+
+    ssl_certificate /etc/nginx/certs/personchat.crt;
+    ssl_certificate_key /etc/nginx/certs/personchat.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 16m;
+    client_body_timeout 30s;
+    client_header_timeout 15s;
+    send_timeout 60s;
+    error_page 413 = @payload_too_large;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # Direct backend API path. Nginx is the trusted proxy peer: overwrite
+    # client-supplied X-Real-IP / X-Forwarded-For instead of appending to them.
+    # Adjust 3010 if the backend listens on a different loopback port.
+    location /backend-api/ {
+        proxy_pass http://127.0.0.1:3010/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        # SSE: no buffering and a read timeout well above the 15s heartbeat.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 660s;
+        proxy_intercept_errors off;
+        add_header X-Accel-Buffering no always;
+        # add_header in a location replaces server-level inheritance.
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+    }
+
+    # 16m at the edge; the backend's attachment limit is 14m.
+    location @payload_too_large {
+        default_type application/json;
+        return 413 '{"error":{"code":"PAYLOAD_TOO_LARGE","message":"Request body too large"}}';
+    }
+
+    # Pages, static assets, /personchat-release.json and all other Next.js paths.
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    access_log /var/log/nginx/personchat.access.log;
+    error_log /var/log/nginx/personchat.error.log warn;
+}
