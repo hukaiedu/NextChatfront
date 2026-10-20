@@ -62,15 +62,65 @@ jobs:
       - name: Production build
         run: yarn build
 
-      - name: Package the tested dev commit
+      - name: Package and verify the tested dev commit
         env:
           GITHUB_SHA: ${{ steps.dev.outputs.sha }}
         run: |
           set -euo pipefail
           node scripts/cd/package-release.mjs "$RUNNER_TEMP/frontend-release"
-          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["sha"] == sys.argv[2]' "$RUNNER_TEMP/frontend-release/release.json" "$GITHUB_SHA"
-          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["sha"] == sys.argv[2]' "$RUNNER_TEMP/frontend-release/public/personchat-release.json" "$GITHUB_SHA"
-          echo "Release manifest is bound to $GITHUB_SHA"
+          python3 - "$RUNNER_TEMP/frontend-release/release.tgz" "$RUNNER_TEMP/frontend-release/release.tgz.sha256" "$GITHUB_SHA" <<'PY'
+          import hashlib, json, sys, tarfile
+
+          archive_path, checksum_path, expected_sha = sys.argv[1:4]
+
+          with open(archive_path, "rb") as archive_file:
+              actual_digest = hashlib.sha256(archive_file.read()).hexdigest()
+
+          with open(checksum_path, "r", encoding="utf-8") as checksum_file:
+              checksum_parts = checksum_file.read().split()
+
+          if len(checksum_parts) < 2 or checksum_parts[0] != actual_digest or checksum_parts[1] != "release.tgz":
+              raise SystemExit(
+                  f"release.tgz.sha256 mismatch: file={checksum_parts!r}, actual={actual_digest}"
+              )
+
+          with tarfile.open(archive_path, "r:gz") as archive:
+              def read_json(name):
+                  try:
+                      member = archive.getmember(name)
+                  except KeyError:
+                      raise SystemExit(f"Missing {name} in release.tgz")
+                  extracted = archive.extractfile(member)
+                  if extracted is None:
+                      raise SystemExit(f"{name} is not a regular file in release.tgz")
+                  return json.load(extracted)
+
+              manifest = read_json("./release.json")
+              marker = read_json("./public/personchat-release.json")
+
+          if manifest.get("sha") != expected_sha:
+              raise SystemExit(
+                  f"release.json SHA mismatch: {manifest.get('sha')} != {expected_sha}"
+              )
+          if manifest.get("platform") != "linux":
+              raise SystemExit(
+                  f"release.json platform mismatch: {manifest.get('platform')}"
+              )
+          if manifest.get("arch") != "x64":
+              raise SystemExit(f"release.json arch mismatch: {manifest.get('arch')}")
+          node_version = manifest.get("node")
+          if not isinstance(node_version, str) or not node_version.startswith("24."):
+              raise SystemExit(
+                  f"release.json node mismatch: {node_version!r}"
+              )
+          if marker.get("sha") != expected_sha:
+              raise SystemExit(
+                  f"personchat-release.json SHA mismatch: {marker.get('sha')} != {expected_sha}"
+              )
+
+          print(f"Verified release archive for {expected_sha}")
+          PY
+          echo "Release archive and manifests are bound to $GITHUB_SHA"
 
       - name: Upload the dev release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
