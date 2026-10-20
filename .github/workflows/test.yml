@@ -5,6 +5,7 @@ on:
     branches: [dev, main, master]
   pull_request:
     branches: [dev, main, master]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -41,12 +42,12 @@ jobs:
       - name: Production build
         run: yarn build
 
-      - name: Package the tested main commit
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Package the tested commit
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         run: node scripts/cd/package-release.mjs "$RUNNER_TEMP/frontend-release"
 
       - name: Upload tested release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: frontend-${{ github.sha }}
