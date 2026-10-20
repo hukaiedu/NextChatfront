@@ -108,6 +108,11 @@ const en: LocaleType = {
     ChatItemCount: (count: number) => `${count} messages`,
   },
   Chat: {
+    Progress: {
+      Pending: "Queued",
+      Processing: "Generating",
+      Cancelling: "Cancelling",
+    },
     SubTitle: (count: number) => `${count} messages`,
     HistoryLoading: "Loading history…",
     HistoryError: "Failed to load history",
@@ -315,6 +320,7 @@ const en: LocaleType = {
     Update: {
       Version: (x: string) => `Version: ${x}`,
       IsLatest: "Latest version",
+      CheckFailed: "Unable to check for updates. Please try again later.",
       CheckUpdate: "Check Update",
       IsChecking: "Checking update...",
       FoundUpdate: (x: string) => `Found new version: ${x}`,
@@ -749,60 +755,12 @@ const en: LocaleType = {
       },
     },
   },
-  Browser: {
-    Title: "Backend Browser",
-    SubTitle:
-      "The browser instance personChat Backend drives to reach Gemini Web",
-    State: {
-      RUNNING: "Running",
-      STARTING: "Starting",
-      RESTARTING: "Restarting",
-      STOPPED: "Not running",
-      FAILED: "Failed",
-      UNKNOWN: "Unknown",
-    },
-    Hint: {
-      RUNNING: "Browser is running normally",
-      STARTING: "Starting the browser, please wait",
-      RESTARTING: "Restarting the browser, please wait",
-      STOPPED:
-        "Browser is closed; it starts again on restart or on a new message",
-      FAILED: "Browser is unhealthy; try restarting it or check backend logs",
-      UNKNOWN: "Browser status not fetched yet",
-    },
-    Fields: {
-      StartedAt: "Started at",
-      Uptime: "Uptime",
-      BrowserType: "Browser",
-      Profile: "User profile",
-      LoggedIn: "Gemini sign-in",
-      ActiveRequests: "Answers in progress",
-      LastError: "Last error",
-      RefreshedAt: "Status updated",
-    },
-    LoggedIn: {
-      Yes: "Signed in",
-      No: "Signed out",
-      Unknown: "Unknown",
-    },
-    Headless: {
-      Yes: "Headless",
-      No: "Headed",
-    },
-    Actions: {
-      Refresh: "Refresh",
-      Restart: "Restart browser",
-    },
-    RestartTip: "Restarting interrupts answers in progress",
-    RestartConfirm:
-      "Restarting interrupts answers in progress. Restart the backend browser?",
-    RestartSuccess: "Backend browser restarted",
-    FetchFailed: "Failed to fetch browser status",
-    Unsupported:
-      "This backend version has no browser status API; please upgrade personChat Backend",
-    Empty: "—",
-  },
   AdminConsole: {
+    LoginDescription:
+      "Manage Gemini credential status and Python Worker runtime.",
+    PasswordLabel: "Admin password",
+    Submitting: "Signing in…",
+    LoginProbing: "Checking your session…",
     Title: "Admin console",
     LoginTitle: "Admin sign-in",
     PasswordPlaceholder: "Enter admin password",
@@ -836,26 +794,54 @@ const en: LocaleType = {
       RevokeAllFailed: "Failed to revoke sessions, please try again",
     },
     Provider: {
-      Title: "Provider status",
-      SubTitle: "How ready the provider page behind the backend is",
+      Title: "Gemini Provider / Python Worker",
+      SubTitle:
+        "The backend calls Gemini through a Python Worker; this panel manages Worker status and credential checks",
       State: {
-        STOPPED: "Stopped",
-        STARTING: "Starting",
-        LOGIN_REQUIRED: "Sign-in required",
-        READY: "Ready",
-        BUSY: "Working",
-        ERROR: "Error",
+        READY: "Worker ready",
+        BUSY: "Worker busy",
+        LOGIN_REQUIRED: "Credentials need re-import",
       },
       Unknown: "Unknown",
-      Actions: "Provider actions",
+      Actions: "Operations",
       ActionsTip:
-        "Open starts and focuses the provider page; Restart closes it and relaunches with the same profile",
-      Open: "Open provider",
-      OpenSuccess: "Provider page opened",
-      Restart: "Restart provider",
+        "Check validates the model catalog only and never sends a chat message; Restart restarts the backend Python Worker",
+      Check: "Check connection/credentials",
+      CheckTip:
+        "Requests the model catalog to validate Gemini credentials. This validates the model catalog only, not chat generation.",
+      CheckResult: {
+        NOT_CHECKED: "Not checked",
+        MODEL_CATALOG_OK: "Model catalog request succeeded",
+        LOGIN_REQUIRED: "Credentials invalid; re-import required",
+        BUSY: "Service is busy; try again shortly",
+        NOT_READY: "Worker is not ready",
+        CHECK_FAILED: "Check failed",
+      },
+      CheckDetails: (count: number, time: string) =>
+        `${count} models · Checked ${time}`,
+      CheckTime: (time: string) => `Checked ${time}`,
+      CheckFailureCode: (code: string) => `Diagnostic code: ${code}`,
+      CheckFailed: (code: string) =>
+        `Check failed (${code}); please try again later.`,
+      Refresh: "Refresh status",
+      Restart: "Restart Python Worker",
       RestartConfirm:
-        "Restart the provider? The current page closes and in-flight generations fail.",
-      RestartSuccess: "Provider restarted",
+        "Restart the Python Worker? The backend rejects this while a restart or an in-flight answer is active.",
+      RestartSuccess: "Python Worker restarted",
+      RestartConflict:
+        "A restart or an answer is already in progress; please try again later.",
+      RestartTimeout:
+        "Timed out waiting for the restart result; the worker may still be restarting. Refresh the status shortly.",
+      RestartFailed: (code: string) =>
+        `Restart failed (${code}); check the backend logs and try again.`,
+      ActionFailed: (code: string) =>
+        `Operation failed (${code}); please try again later.`,
+      NetworkFailed: "Cannot reach the backend; check the service status.",
+      CredentialTitle: "Credentials invalid",
+      CredentialTip:
+        "Re-import the Gemini credentials in the backend, then check the connection again.",
+      CredentialCommand: "yarn gemini-auth import --input <credential-file>",
+      Empty: "—",
     },
     Logout: {
       Title: "Sign out of admin",

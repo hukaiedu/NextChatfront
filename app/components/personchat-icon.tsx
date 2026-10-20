@@ -10,7 +10,7 @@ export function PersonChatIcon(props: {
 
   return (
     <Image
-      src="/icon.png"
+      src="/mark.png"
       alt=""
       aria-hidden="true"
       width={width}

@@ -3,6 +3,7 @@
   "private": false,
   "license": "mit",
   "scripts": {
+    "typecheck": "tsc --noEmit --incremental false",
     "mask": "npx tsx app/masks/build.ts",
     "mask:watch": "npx watch \"yarn mask\" app/masks",
     "dev": "concurrently -r \"yarn run mask:watch\" \"next dev\"",

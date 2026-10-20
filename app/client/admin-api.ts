@@ -2,56 +2,13 @@
  * V1.3-C §22/§41:Admin Console 的 API 客户端。
  *
  * 与 Public 客户端(app/client/backend-api.ts)刻意分层:
- * - 这里的类型含运维内部字段(profileDir / providerLoggedIn / headless / browserType / lastError),
- *   只能被 /admin 页面消费,不得进入普通聊天 UI。
- * - 所有请求走 canonical `/backend-api/admin/*`;旧 `/browser/*`、`/provider/status` 等
- *   兼容 alias 已随 V1.3-C 从后端删除,前端零引用。
+ * - 这里的类型含运维内部字段(authCheck / failureCode),只能被 /admin 页面消费,
+ *   不得进入普通聊天 UI。
+ * - 所有请求走 canonical `/backend-api/admin/*`;浏览器运行时与页面登录相关端点
+ *   已随后端退役,前端零引用。
  */
 
 import { callBackend } from "./backend-api";
-
-/** 后端浏览器实例的生命周期状态 */
-export type AdminBrowserState =
-  | "RUNNING"
-  | "STARTING"
-  | "RESTARTING"
-  | "STOPPED"
-  | "FAILED";
-
-export interface AdminBrowserError {
-  code: string;
-  message?: string | null;
-}
-
-/** GET /api/admin/browser/status 的负载(BrowserStatusSnapshot) */
-export interface AdminBrowserStatus {
-  state: AdminBrowserState;
-  /** "chromium" */
-  browserType: string;
-  headless: boolean;
-  /** 持久化 Profile 目录(运维字段) */
-  profileDir: string;
-  startedAt: string | null;
-  uptimeMs: number | null;
-  /** Provider 登录态;null = 后端未探测 */
-  providerLoggedIn: boolean | null;
-  /** 正在 PENDING / PROCESSING / CANCELLING 的 Request 数 */
-  activeRequests: number;
-  lastError: AdminBrowserError | null;
-  /** 后端生成该快照的时间(ISO) */
-  observedAt: string;
-}
-
-export function getAdminBrowserStatus(): Promise<AdminBrowserStatus> {
-  return callBackend<AdminBrowserStatus>("/admin/browser/status");
-}
-
-/** POST /api/admin/browser/restart:耗时较长(关旧实例 + 起新实例 + 打开 Provider 页面) */
-export function restartAdminBrowser(): Promise<AdminBrowserStatus> {
-  return callBackend<AdminBrowserStatus>("/admin/browser/restart", {
-    method: "POST",
-  });
-}
 
 /**
  * POST /api/admin/sessions/revoke-all:吊销调用者(ADMIN)的全部 Session(含当前这条)。
@@ -63,41 +20,61 @@ export function revokeAllAdminSessions(): Promise<{ revoked: number }> {
   });
 }
 
-/**
- * Provider(Browser Manager 里那个 Provider 页面)的生命周期状态。
- * 与浏览器实例状态分开:浏览器可以已在跑但 Provider 页面还没打开/未登录。
- */
-export type AdminProviderState =
-  | "STOPPED"
-  | "STARTING"
-  | "LOGIN_REQUIRED"
-  | "READY"
-  | "BUSY"
-  | "ERROR";
+/** 后端 Python Worker 暴露的运行状态(与 provider-runtime.ts 的枚举一致)。 */
+export type AdminProviderState = "READY" | "BUSY" | "LOGIN_REQUIRED";
+
+/** Provider 状态轮询间隔:页面可见时刷新,隐藏时跳过,卸载即停表 */
+export const PROVIDER_STATUS_POLL_INTERVAL_MS = 15000;
 
 export interface AdminProviderStatus {
   /** 后端回显的 Provider 标识(GEMINI_WEB),仅 Admin 面可见 */
   provider: string;
   status: AdminProviderState;
+  /** GET/CHECK 返回;RESTART 只返回 provider + status */
+  authCheck?: AdminProviderAuthCheck;
 }
 
-export function getAdminProviderStatus(): Promise<AdminProviderStatus> {
-  return callBackend<AdminProviderStatus>("/admin/provider/status");
+export interface AdminProviderAuthCheck {
+  result:
+    | "NOT_CHECKED"
+    | "MODEL_CATALOG_OK"
+    | "LOGIN_REQUIRED"
+    | "BUSY"
+    | "NOT_READY"
+    | "CHECK_FAILED";
+  /** 后端明确声明:只验证模型目录,不代表聊天生成可用 */
+  scope: "MODEL_CATALOG_ONLY";
+  checkedAt: string | null;
+  modelCount: number | null;
+  failureCode: string | null;
 }
 
-/** POST /api/admin/provider/open:启动 Browser Manager 并打开/聚焦 Provider 页面 */
-export function openAdminProvider(): Promise<AdminProviderStatus> {
-  return callBackend<AdminProviderStatus>("/admin/provider/open", {
+export function getAdminProviderStatus(
+  signal?: AbortSignal,
+): Promise<AdminProviderStatus> {
+  return callBackend<AdminProviderStatus>("/admin/provider/status", { signal });
+}
+
+/** POST /api/admin/provider/check:检查凭据能否完成模型目录请求，不发送聊天消息。 */
+export function checkAdminProvider(
+  signal?: AbortSignal,
+): Promise<AdminProviderStatus> {
+  return callBackend<AdminProviderStatus>("/admin/provider/check", {
     method: "POST",
+    signal,
   });
 }
 
 /**
- * POST /api/admin/provider/restart:关闭 Context 后用同一 Profile 重启。
- * 有 Request 在飞时后端会拒绝(运维不该顺手打断生成)。
+ * POST /api/admin/provider/restart:重启后端 Python Worker。
+ * 已有重启或活动请求时后端返回 409 PROVIDER_RESTART_CONFLICT;
+ * HTTP 等待超时返回 504 PROVIDER_RESTART_TIMEOUT(后台可能仍在重启)。
  */
-export function restartAdminProvider(): Promise<AdminProviderStatus> {
+export function restartAdminProvider(
+  signal?: AbortSignal,
+): Promise<AdminProviderStatus> {
   return callBackend<AdminProviderStatus>("/admin/provider/restart", {
     method: "POST",
+    signal,
   });
 }

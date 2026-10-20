@@ -29,24 +29,26 @@ function formatVersionDate(t: string) {
 
 type VersionType = "date" | "tag";
 
-async function getVersion(type: VersionType) {
-  if (type === "date") {
-    const data = (await (await fetch(FETCH_COMMIT_URL)).json()) as {
-      commit: {
-        author: { name: string; date: string };
-      };
-      sha: string;
-    }[];
-    const remoteCommitTime = data[0].commit.author.date;
-    const remoteId = new Date(remoteCommitTime).getTime().toString();
-    return remoteId;
-  } else if (type === "tag") {
-    const data = (await (await fetch(FETCH_TAG_URL)).json()) as {
-      commit: { sha: string; url: string };
-      name: string;
-    }[];
-    return data.at(0)?.name;
+export async function getVersion(type: VersionType): Promise<string> {
+  const response = await fetch(
+    type === "date" ? FETCH_COMMIT_URL : FETCH_TAG_URL,
+  );
+  if (!response.ok) throw new Error("Version service unavailable");
+  const data: unknown = await response.json();
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new Error("Invalid version response");
   }
+  if (type === "tag") {
+    const name = data[0]?.name;
+    if (typeof name !== "string" || !name.trim()) {
+      throw new Error("Invalid version tag");
+    }
+    return name;
+  }
+  const date = data[0]?.commit?.author?.date;
+  const time = typeof date === "string" ? Date.parse(date) : NaN;
+  if (!Number.isFinite(time)) throw new Error("Invalid version date");
+  return time.toString();
 }
 
 export const useUpdateStore = createPersistStore(
@@ -55,6 +57,7 @@ export const useUpdateStore = createPersistStore(
     lastUpdate: 0,
     version: "unknown",
     remoteVersion: "",
+    updateError: false,
     used: 0,
     subscription: 0,
 
@@ -82,6 +85,7 @@ export const useUpdateStore = createPersistStore(
 
       set(() => ({
         lastUpdate: Date.now(),
+        updateError: false,
       }));
 
       try {
@@ -128,8 +132,8 @@ export const useUpdateStore = createPersistStore(
             });
         }
         console.log("[Got Upstream] ", remoteId);
-      } catch (error) {
-        console.error("[Fetch Upstream Commit Id]", error);
+      } catch {
+        set(() => ({ remoteVersion: "", updateError: true, lastUpdate: 0 }));
       }
     },
 

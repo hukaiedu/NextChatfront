@@ -659,6 +659,30 @@ describe("第 7 阶段:NextChat 以 Backend API 为唯一聊天数据源", () =>
     expect(lastSource().url).toBe("/backend-api/requests/req-1/events");
   });
 
+  test("服务状态按 SSE 前进，迟到帧不退回排队，超时撤销活动提示", async () => {
+    await useChatStore.getState().bootstrap();
+    await useChatStore.getState().onUserInput("hi");
+    await tick();
+    const source = lastSource();
+    expect(assistantMessage().backendStatus).toBe("PENDING");
+    source.emit("status", statusFrame("req-1", { status: "STREAMING" }));
+    expect(assistantMessage().backendStatus).toBe("PROCESSING");
+    source.emit("status", statusFrame("req-1", { status: "PENDING", requestStatus: "PENDING" }));
+    expect(assistantMessage().backendStatus).toBe("PROCESSING");
+    source.emit("status", statusFrame("req-1", { requestStatus: "CANCELLING" }));
+    expect(assistantMessage().backendStatus).toBe("CANCELLING");
+    source.emit("delta", { content: "停止前的回答" });
+    expect(assistantMessage().backendStatus).toBe("CANCELLING");
+    source.emit("status", statusFrame("req-1", { status: "FAILED", requestStatus: "TIMEOUT", errorCode: "REQUEST_TIMEOUT" }));
+    expect(assistantMessage().backendStatus).toBe("TIMEOUT");
+    expect(assistantMessage().streaming).toBe(false);
+    expect(assistantMessage().isError).toBe(true);
+    expect(activeSession().pendingRequestId).toBeUndefined();
+    expect(errorTextForCode(assistantMessage().errorCode)).toBe("请求超时,请重试。");
+    expect(errorTextForCode("CONVERSATION_LIMIT_REACHED")).toBe("会话存储数量已达到上限，请联系管理员。");
+    await tick();
+  });
+
   test("③ delta 帧是本连接已发文本的后缀增量,短增量同样不能丢", async () => {
     await useChatStore.getState().bootstrap();
     await useChatStore.getState().onUserInput("hi");
@@ -721,7 +745,7 @@ describe("第 7 阶段:NextChat 以 Backend API 为唯一聊天数据源", () =>
     expect(failed.streaming).toBe(false);
     expect(failed.isError).toBe(true);
     expect(failed.errorCode).toBe("CHAT_FAILED");
-    expect(errorTextForCode(failed.errorCode)).toBe("请求失败,请重试。");
+    expect(errorTextForCode(failed.errorCode)).toBe("服务暂不可用，请联系管理员。");
   });
 
   test("⑤ 刷新后从后端恢复历史消息", async () => {
@@ -2981,6 +3005,24 @@ describe("PAG-2:Message 历史分页(设计 §二十九 store 矩阵)", () => {
     );
   });
 
+  test("排队状态从快照前进，保留本地回答且迟到排队快照不倒退", () => {
+    const pending = {
+      id: "progress-message", role: "assistant" as const, date: "",
+      content: "本地内容", streaming: true, backendStatus: "PENDING" as const,
+    };
+    const processing = { ...pending, content: "旧内容", backendStatus: "PROCESSING" as const };
+    const merged = mergeFreshMessageWithLocal(processing, pending);
+    expect(merged.backendStatus).toBe("PROCESSING");
+    expect(merged.content).toBe("本地内容");
+    expect(mergeFreshMessageWithLocal(pending, merged)).toBe(merged);
+    const cancelling = { ...processing, backendStatus: "CANCELLING" as const };
+    const cancellingMerged = mergeFreshMessageWithLocal(cancelling, merged);
+    expect(cancellingMerged.backendStatus).toBe("CANCELLING");
+    expect(mergeFreshMessageWithLocal(processing, cancellingMerged)).toBe(cancellingMerged);
+    const terminal = { ...merged, streaming: false, backendStatus: "SUCCESS" as const };
+    expect(mergeFreshMessageWithLocal(processing, terminal)).toBe(terminal);
+  });
+
   test("PAG2-FE-19B totalCount 防回退:A1 立即同步 + 旧响应 200 不回退 + loadOlder 在途 send", async () => {
     // A1:latest inflight 期间 send → totalCount 立即 202;旧 meta.totalCount=200 不回退
     await seedLoadedConversation("c-1", 200);
@@ -4718,7 +4760,7 @@ describe("I3-A:图片附件发送(accepted 边界 / tracking 恢复 / USER 图�
   const TERMINAL_ERROR_CODES: { code: string; text: string }[] = [
     {
       code: "CHAT_FAILED",
-      text: "请求失败,请重试。",
+      text: "服务暂不可用，请联系管理员。",
     },
     {
       code: "REQUEST_TIMEOUT",

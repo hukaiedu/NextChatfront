@@ -173,14 +173,16 @@ describe("FIX-01A:Public 助手身份去实现品牌", () => {
     );
     expect(emoji).toContain('modelName.startsWith("gemini")');
 
-    // B 类:浏览器运维文案(Gemini Web 字样)只服务 Admin 面板
+    // B 类:Provider / Python Worker 运维文案只服务 Admin 面板
     const adminPage = readFileSync("app/admin/page.tsx", "utf8");
-    expect(adminPage).toContain('from "../components/browser-status"');
+    expect(adminPage).toContain("<AdminProviderSection");
     for (const file of [
       "app/components/settings.tsx",
       "app/components/chat.tsx",
     ]) {
-      expect([file, /Locale\.Browser/.test(readFileSync(file, "utf8"))]).toEqual([
+      const source = readFileSync(file, "utf8");
+      expect([file, /Locale\.Browser/.test(source)]).toEqual([file, false]);
+      expect([file, /Locale\.AdminConsole\.Provider/.test(source)]).toEqual([
         file,
         false,
       ]);

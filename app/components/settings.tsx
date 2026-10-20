@@ -350,6 +350,8 @@ export function Settings() {
             subTitle={
               checkingUpdate
                 ? Locale.Settings.Update.IsChecking
+                : updateStore.updateError
+                ? Locale.Settings.Update.CheckFailed
                 : hasNewVersion
                 ? Locale.Settings.Update.FoundUpdate(remoteId ?? "ERROR")
                 : Locale.Settings.Update.IsLatest

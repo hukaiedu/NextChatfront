@@ -1,39 +1,111 @@
-name: Run Tests
+name: Frontend checks
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - "!*"
+    branches: [dev, main, master]
   pull_request:
-    types:
-      - review_requested
+    branches: [dev, main, master]
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-
+    # Match the production server's Ubuntu 22.04 / x86_64 runtime.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: "yarn"
-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node_modules-${{ hashFiles('**/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-node_modules-
+          cache: yarn
 
       - name: Install dependencies
-        run: yarn install
+        run: yarn install --frozen-lockfile
+
+      - name: Verify release and rollback tools
+        run: node --test scripts/cd/release.test.mjs
 
       - name: Run Jest tests
-        run: yarn test:ci
+        run: yarn test:ci --runInBand
+
+      - name: Typecheck
+        run: yarn typecheck
+
+      - name: Production build
+        run: yarn build
+
+      - name: Package the tested main commit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: node scripts/cd/package-release.mjs "$RUNNER_TEMP/frontend-release"
+
+      - name: Upload tested release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/frontend-release/release.tgz
+            ${{ runner.temp }}/frontend-release/release.tgz.sha256
+          if-no-files-found: error
+          retention-days: 7
+          # A re-run of all jobs must replace the previous attempt's artifact
+          # (v4 otherwise returns 409 for the same name in the same run).
+          # Re-run the whole workflow, not only the failed deploy job.
+          overwrite: true
+
+  deploy:
+    name: Deploy stable main to Linux
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: personchat-front-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout the exact tested commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Skip superseded main commits
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$latest" == "$GITHUB_SHA" ]]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+            echo 'This commit was superseded on main; deployment skipped.'
+          fi
+
+      - name: Download the tested release
+        if: steps.latest.outputs.deploy == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frontend-${{ github.sha }}
+          path: ${{ runner.temp }}/frontend-release
+
+      - name: Deploy and verify, or roll back
+        if: steps.latest.outputs.deploy == 'true'
+        env:
+          FRONTEND_DEPLOY_HOST: ${{ vars.FRONTEND_DEPLOY_HOST }}
+          FRONTEND_DEPLOY_USER: ${{ vars.FRONTEND_DEPLOY_USER }}
+          FRONTEND_SSH_PORT: ${{ vars.FRONTEND_SSH_PORT }}
+          FRONTEND_DEPLOY_ROOT: ${{ vars.FRONTEND_DEPLOY_ROOT }}
+          FRONTEND_PORT: ${{ vars.FRONTEND_PORT }}
+          FRONTEND_SERVICE: ${{ vars.FRONTEND_SERVICE }}
+          FRONTEND_SSH_KEY: ${{ secrets.FRONTEND_SSH_KEY }}
+          FRONTEND_KNOWN_HOSTS: ${{ secrets.FRONTEND_KNOWN_HOSTS }}
+        run: bash scripts/cd/push-release.sh

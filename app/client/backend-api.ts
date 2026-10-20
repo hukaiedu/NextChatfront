@@ -1,7 +1,8 @@
 /**
  * personChat 后端 API 客户端(第 7 阶段)。
  *
- * 浏览器只和同源 `/backend-api/*` 说话,由 next.config.mjs 代理到后端 `/api/*`,
+ * 浏览器只和同源 `/backend-api/*` 说话。生产公网由 Nginx 直连后端;本地开发、
+ * 直接访问前端端口和部署健康检查使用 app/backend-api/[...path]/route.ts。
  * 所以这里不需要 CORS、也不需要上游 Provider 的任何鉴权头。
  */
 
@@ -176,6 +177,8 @@ export async function callBackend<T>(
     method?: string;
     body?: unknown;
     headers?: Record<string, string>;
+    /** 组件卸载时取消在途请求(Admin 运维轮询使用) */
+    signal?: AbortSignal;
   } = {},
 ): Promise<T> {
   const response = await fetch(`${PREFIX}${path}`, {
@@ -187,6 +190,7 @@ export async function callBackend<T>(
       ...init.headers,
     },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: init.signal,
   });
 
   if (response.status === 204) {

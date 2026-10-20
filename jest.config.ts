@@ -13,6 +13,7 @@ const config: Config = {
   testMatch: ["**/*.test.js", "**/*.test.ts", "**/*.test.jsx", "**/*.test.tsx"],
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
   moduleNameMapper: {
+    "^next/image$": "<rootDir>/test/next-image-mock.tsx",
     "^@/(.*)$": "<rootDir>/$1",
     // @svgr/webpack 只在 next build 里生效;测试里 svg 导入给个空组件
     // (键名必须与 next/jest 默认规则一致才能覆盖其 fileMock)

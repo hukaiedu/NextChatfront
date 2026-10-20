@@ -86,6 +86,11 @@ function copyRequestHeaders(request: Request): Headers {
     headers.set(name, value);
   }
 
+  // Node fetch transparently decompresses upstream responses. Ask the
+  // upstream for identity so we never negotiate an encoding we would then
+  // have to strip from the response.
+  headers.set("accept-encoding", "identity");
+
   return headers;
 }
 
@@ -98,6 +103,10 @@ function copyResponseHeaders(response: Response): Headers {
     const normalizedName = name.toLowerCase();
     if (
       RESPONSE_HOP_BY_HOP_HEADERS.has(normalizedName) ||
+      // fetch already decoded the body; forwarding these would make the
+      // browser try to decode plain bytes or wait for a stale length.
+      normalizedName === "content-encoding" ||
+      normalizedName === "content-length" ||
       normalizedName === "set-cookie"
     ) {
       continue;
@@ -132,7 +141,7 @@ async function proxy(
     return jsonResponse({ error: "Backend proxy is not configured" }, 500);
   }
 
-  const fetchInit: RequestInit & { duplex?: "half" } = {
+  const fetchInit: RequestInit = {
     method: request.method,
     headers: copyRequestHeaders(request),
     redirect: "manual",
@@ -141,8 +150,8 @@ async function proxy(
   };
 
   if (request.body && request.method !== "GET" && request.method !== "HEAD") {
-    fetchInit.body = request.body;
-    fetchInit.duplex = "half";
+    // A replayable body also lets fetch return early authentication failures.
+    fetchInit.body = await request.arrayBuffer();
   }
 
   try {
