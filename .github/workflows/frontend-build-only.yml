@@ -1,0 +1,84 @@
+name: Frontend build-only (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build dev release artifact
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Resolve the current dev commit
+        id: dev
+        run: |
+          set -euo pipefail
+          sha=$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/heads/dev" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]] || { echo "Invalid dev SHA: $sha" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved dev commit: $sha"
+
+      - name: Require a successful Frontend checks run for the dev commit
+        id: ci
+        env:
+          DEV_SHA: ${{ steps.dev.outputs.sha }}
+        run: |
+          set -euo pipefail
+          check=$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$DEV_SHA&per_page=100" | python3 -c 'import json,sys; d=json.load(sys.stdin); m=[r for r in d.get("workflow_runs",[]) if r.get("name")=="Frontend checks" and r.get("event")=="push" and r.get("head_sha")==sys.argv[1] and r.get("status")=="completed" and r.get("conclusion")=="success"]; print(m[0].get("html_url","") if m else ""); sys.exit(0 if m else 1)' "$DEV_SHA")
+          echo "url=$check" >> "$GITHUB_OUTPUT"
+          echo "Referenced dev CI run: $check"
+          echo "Dev CI (Frontend checks / push) passed for $DEV_SHA: $check" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout the exact dev commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ steps.dev.outputs.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out dev commit
+        env:
+          DEV_SHA: ${{ steps.dev.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          test "$actual" = "$DEV_SHA"
+          echo "Checked out $actual"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Typecheck
+        run: yarn typecheck
+
+      - name: Production build
+        run: yarn build
+
+      - name: Package the tested dev commit
+        env:
+          GITHUB_SHA: ${{ steps.dev.outputs.sha }}
+        run: |
+          set -euo pipefail
+          node scripts/cd/package-release.mjs "$RUNNER_TEMP/frontend-release"
+          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["sha"] == sys.argv[2]' "$RUNNER_TEMP/frontend-release/release.json" "$GITHUB_SHA"
+          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["sha"] == sys.argv[2]' "$RUNNER_TEMP/frontend-release/public/personchat-release.json" "$GITHUB_SHA"
+          echo "Release manifest is bound to $GITHUB_SHA"
+
+      - name: Upload the dev release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-dev-${{ steps.dev.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/frontend-release/release.tgz
+            ${{ runner.temp }}/frontend-release/release.tgz.sha256
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
