@@ -40,11 +40,11 @@ jobs:
 
       - name: Verify the checked-out dev commit
         env:
-          DEV_SHA: ${{ steps.dev.outputs.sha }}
+          RELEASE_SHA: ${{ steps.dev.outputs.sha }}
         run: |
           set -euo pipefail
           actual=$(git rev-parse HEAD)
-          test "$actual" = "$DEV_SHA"
+          test "$actual" = "$RELEASE_SHA"
           echo "Checked out $actual"
 
       - name: Set up Node.js
@@ -64,11 +64,12 @@ jobs:
 
       - name: Package and verify the tested dev commit
         env:
-          GITHUB_SHA: ${{ steps.dev.outputs.sha }}
+          RELEASE_SHA: ${{ steps.dev.outputs.sha }}
         run: |
           set -euo pipefail
-          node scripts/cd/package-release.mjs "$RUNNER_TEMP/frontend-release"
-          python3 - "$RUNNER_TEMP/frontend-release/release.tgz" "$RUNNER_TEMP/frontend-release/release.tgz.sha256" "$GITHUB_SHA" <<'PY'
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          env GITHUB_SHA="$RELEASE_SHA" node scripts/cd/package-release.mjs "$RUNNER_TEMP/frontend-release"
+          python3 - "$RUNNER_TEMP/frontend-release/release.tgz" "$RUNNER_TEMP/frontend-release/release.tgz.sha256" "$RELEASE_SHA" <<'PY'
           import hashlib, json, sys, tarfile
 
           archive_path, checksum_path, expected_sha = sys.argv[1:4]
@@ -120,12 +121,14 @@ jobs:
 
           print(f"Verified release archive for {expected_sha}")
           PY
-          echo "Release archive and manifests are bound to $GITHUB_SHA"
+          echo "Release archive and manifests are bound to $RELEASE_SHA"
 
       - name: Upload the dev release artifact
+        env:
+          RELEASE_SHA: ${{ steps.dev.outputs.sha }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: frontend-dev-${{ steps.dev.outputs.sha }}
+          name: frontend-dev-${{ env.RELEASE_SHA }}
           path: |
             ${{ runner.temp }}/frontend-release/release.tgz
             ${{ runner.temp }}/frontend-release/release.tgz.sha256
