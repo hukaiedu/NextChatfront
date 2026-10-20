@@ -34,8 +34,37 @@ function AdminConsolePage() {
   const router = useRouter();
   const clearIdentity = useAuthStore((state) => state.clearIdentity);
   const logout = useAuthStore((state) => state.logout);
+  const authStatus = useAuthStore((state) => state.status);
+  const authUserType = useAuthStore((state) => state.userType);
   const [identity, setIdentity] = useState<AuthSessionInfo | null>(null);
   const [busy, setBusy] = useState<"revoke" | "logout" | null>(null);
+
+  const pageAlive = useRef(true);
+  const pageLifecycle = useRef(0);
+  const reprobeInFlight = useRef(false);
+  const reprobeGeneration = useRef(0);
+  const leftConsole = useRef(false);
+  const actionConfirm = useRef<number | null>(null);
+  const actionConfirmSeq = useRef(0);
+  const storeObservedAdmin = useRef(false);
+
+  useEffect(() => {
+    pageLifecycle.current += 1;
+    pageAlive.current = true;
+    actionConfirm.current = null;
+    return () => {
+      pageAlive.current = false;
+    };
+  }, []);
+
+  const convergeToLogin = useCallback(() => {
+    if (leftConsole.current) return;
+    leftConsole.current = true;
+    setIdentity(null);
+    // The global 401 handler may already have cleared the store.
+    if (useAuthStore.getState().status === "authenticated") clearIdentity();
+    router.replace("/admin/login");
+  }, [clearIdentity, router]);
 
   useEffect(() => {
     let alive = true;
@@ -45,71 +74,117 @@ function AdminConsolePage() {
         if (session.authenticated && session.userType === "ADMIN") {
           setIdentity(session);
         } else {
-          router.replace("/admin/login");
+          convergeToLogin();
         }
       })
       .catch(() => {
-        if (alive) router.replace("/admin/login");
+        if (alive) convergeToLogin();
       });
     return () => {
       alive = false;
     };
-  }, [router]);
+  }, [convergeToLogin]);
+
+  // The store is authoritative for the rest of the app. Once it has observed
+  // an ADMIN identity, any later non-ADMIN state must close this console
+  // immediately, even if the 15s provider poll has not fired yet.
+  useEffect(() => {
+    if (authStatus === "authenticated" && authUserType === "ADMIN") {
+      storeObservedAdmin.current = true;
+      return;
+    }
+    if (!identity || !storeObservedAdmin.current) return;
+    convergeToLogin();
+  }, [authStatus, authUserType, identity, convergeToLogin]);
 
   /**
    * FIX-02B:Cookie 在全 Tab 间共享,另一个 Tab 的 logout / revoke-all 会让本 Tab
    * 的管理员身份失效。页面重新活跃时轻量复核一次 —— 不轮询、不建匿名身份。
+   * Unmount invalidates the in-flight probe so it cannot clear identity or
+   * navigate after the console is gone; the generation also protects
+   * StrictMode double effects.
    */
-  const reprobeInFlight = useRef(false);
-  const leftConsole = useRef(false);
   useEffect(() => {
+    let alive = true;
     const reprobe = () => {
       if (document.visibilityState !== "visible") return;
       if (reprobeInFlight.current || leftConsole.current) return;
       reprobeInFlight.current = true;
+      const generation = ++reprobeGeneration.current;
       void getAuthSession()
         .then((session) => {
+          if (
+            !alive ||
+            generation !== reprobeGeneration.current ||
+            leftConsole.current
+          ) {
+            return;
+          }
           if (session.authenticated && session.userType === "ADMIN") {
             setIdentity(session);
             return;
           }
-          leftConsole.current = true;
-          // 身份已不属于管理员:清本地身份,回登录页,绝不自动建匿名身份(§9)
-          clearIdentity();
-          router.replace("/admin/login");
+          convergeToLogin();
         })
         .catch(() => {
           // 网络抖动不把管理员踢出:下次再活跃时重新复核
         })
         .finally(() => {
-          reprobeInFlight.current = false;
+          if (alive && generation === reprobeGeneration.current) {
+            reprobeInFlight.current = false;
+          }
         });
     };
     document.addEventListener("visibilitychange", reprobe);
     window.addEventListener("focus", reprobe);
     return () => {
+      alive = false;
+      reprobeGeneration.current += 1;
+      reprobeInFlight.current = false;
       document.removeEventListener("visibilitychange", reprobe);
       window.removeEventListener("focus", reprobe);
     };
-  }, [clearIdentity, router]);
+  }, [convergeToLogin]);
 
   const onRevokeAll = async () => {
-    if (busy) return;
-    if (!(await showConfirm(Locale.AdminConsole.Sessions.RevokeAllConfirm))) {
+    if (busy || actionConfirm.current !== null) return;
+    const lifecycle = pageLifecycle.current;
+    const confirmId = ++actionConfirmSeq.current;
+    actionConfirm.current = confirmId;
+    let confirmed = false;
+    try {
+      confirmed = await showConfirm(
+        Locale.AdminConsole.Sessions.RevokeAllConfirm,
+      );
+    } catch {
+      return;
+    } finally {
+      if (actionConfirm.current === confirmId) actionConfirm.current = null;
+    }
+    if (
+      !confirmed ||
+      leftConsole.current ||
+      !pageAlive.current ||
+      pageLifecycle.current !== lifecycle
+    ) {
       return;
     }
     setBusy("revoke");
     try {
       const { revoked } = await revokeAllAdminSessions();
+      if (!pageAlive.current || pageLifecycle.current !== lifecycle) return;
       // 后端删库成功即已清 Cookie:清本地身份但不重新引导(§42)
       clearIdentity();
+      setIdentity(null);
       showToast(Locale.AdminConsole.Sessions.RevokeAllSuccess(revoked));
       router.replace("/admin/login");
     } catch (error) {
+      if (!pageAlive.current || pageLifecycle.current !== lifecycle) return;
       console.error("[Admin] 吊销全部登录状态失败", error);
-      if (error instanceof BackendApiError && error.status === 401) {
-        // Session 其实已经失效:同样按已登出收口,不再重试
+      if (isSessionLostError(error)) {
+        // Session 其实已经失效/降权:同样按已登出收口,不再重试
         clearIdentity();
+        setIdentity(null);
         router.replace("/admin/login");
         return;
       }
@@ -119,13 +194,34 @@ function AdminConsolePage() {
   };
 
   const onLogout = async () => {
-    if (busy) return;
-    if (!(await showConfirm(Locale.AdminConsole.Logout.Confirm))) return;
+    if (busy || actionConfirm.current !== null) return;
+    const lifecycle = pageLifecycle.current;
+    const confirmId = ++actionConfirmSeq.current;
+    actionConfirm.current = confirmId;
+    let confirmed = false;
+    try {
+      confirmed = await showConfirm(Locale.AdminConsole.Logout.Confirm);
+    } catch {
+      return;
+    } finally {
+      if (actionConfirm.current === confirmId) actionConfirm.current = null;
+    }
+    if (
+      !confirmed ||
+      leftConsole.current ||
+      !pageAlive.current ||
+      pageLifecycle.current !== lifecycle
+    ) {
+      return;
+    }
     setBusy("logout");
     if (await logout()) {
+      if (!pageAlive.current || pageLifecycle.current !== lifecycle) return;
+      setIdentity(null);
       router.replace("/admin/login");
       return;
     }
+    if (!pageAlive.current || pageLifecycle.current !== lifecycle) return;
     showToast(Locale.AdminConsole.Logout.Failed);
     setBusy(null);
   };
@@ -164,7 +260,7 @@ function AdminConsolePage() {
             </ListItem>
           </List>
 
-          <AdminProviderSection />
+          <AdminProviderSection onSessionLost={convergeToLogin} />
 
           <List>
             <ListItem
@@ -258,11 +354,23 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
+function isSessionLostError(error: unknown): boolean {
+  return (
+    error instanceof BackendApiError &&
+    (error.status === 401 ||
+      (error.status === 403 && error.code === "AUTH_FORBIDDEN"))
+  );
+}
+
 /**
  * Provider 运维面板:状态 + 检查连接/凭据 + 重启 Python Worker。
  * 只调用 canonical /admin/provider/*;浏览器运行时相关入口已随本轮退役。
  */
-function AdminProviderSection() {
+function AdminProviderSection({
+  onSessionLost,
+}: {
+  onSessionLost: () => void;
+}) {
   const [status, setStatus] = useState<AdminProviderStatus | null>(null);
   const [busy, setBusy] = useState<"load" | "check" | "restart" | null>(null);
   const busyRef = useRef(false);
@@ -272,21 +380,31 @@ function AdminProviderSection() {
   const restartConfirmSeqRef = useRef(0);
   const requestRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async (silent: boolean) => {
-    if (busyRef.current) return;
-    requestRef.current?.abort();
-    const controller = new AbortController();
-    requestRef.current = controller;
-    try {
-      const next = await getAdminProviderStatus(controller.signal);
-      if (mountedRef.current) setStatus(next);
-    } catch (error) {
-      if (!mountedRef.current || isAbortError(error)) return;
-      if (!silent) showToast(providerErrorText(error, "load"));
-    } finally {
-      if (requestRef.current === controller) requestRef.current = null;
-    }
-  }, []);
+  const load = useCallback(
+    async (silent: boolean) => {
+      if (busyRef.current) return;
+      requestRef.current?.abort();
+      const controller = new AbortController();
+      requestRef.current = controller;
+      try {
+        const next = await getAdminProviderStatus(controller.signal);
+        // A superseded/aborted request must not overwrite a newer state.
+        if (!mountedRef.current || requestRef.current !== controller) return;
+        setStatus(next);
+      } catch (error) {
+        if (!mountedRef.current || isAbortError(error)) return;
+        if (requestRef.current !== controller) return;
+        if (isSessionLostError(error)) {
+          onSessionLost();
+          return;
+        }
+        if (!silent) showToast(providerErrorText(error, "load"));
+      } finally {
+        if (requestRef.current === controller) requestRef.current = null;
+      }
+    },
+    [onSessionLost],
+  );
 
   const run = useCallback(
     async (
@@ -302,7 +420,7 @@ function AdminProviderSection() {
       let reloadAfter = false;
       try {
         const next = await call(controller.signal);
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || requestRef.current !== controller) return;
         // 重启响应不含 authCheck:旧检查结果已随 Worker 重启失效
         setStatus(
           action === "restart" ? { ...next, authCheck: undefined } : next,
@@ -312,21 +430,28 @@ function AdminProviderSection() {
         }
       } catch (error) {
         if (!mountedRef.current || isAbortError(error)) return;
+        if (requestRef.current !== controller) return;
+        if (isSessionLostError(error)) {
+          onSessionLost();
+          return;
+        }
         showToast(providerErrorText(error, action));
         // 409/504 后只回读一次状态;绝不自动重试重启
         reloadAfter = action === "restart";
       } finally {
-        if (requestRef.current === controller) requestRef.current = null;
-        if (mountedRef.current) {
-          busyRef.current = false;
-          setBusy(null);
+        if (requestRef.current === controller) {
+          requestRef.current = null;
+          if (mountedRef.current) {
+            busyRef.current = false;
+            setBusy(null);
+          }
         }
       }
-      if (reloadAfter && mountedRef.current) {
+      if (reloadAfter && mountedRef.current && requestRef.current === null) {
         void load(true);
       }
     },
-    [load],
+    [load, onSessionLost],
   );
 
   useEffect(() => {

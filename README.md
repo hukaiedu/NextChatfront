@@ -12,21 +12,16 @@ Frontend 不直接调用 Gemini API,也不直接驱动 Gemini Web —— 它只�
 Browser
    │
    ▼
-personChat Frontend
-   │
-   │ REST / EventSource
-   ▼
-/backend-api/*
-   │
-   │ Next.js Rewrite
-   ▼
+Nginx (TLS)
+   ├─ /backend-api/* ──► personChat Backend /api/*
+   └─ everything else ─► personChat Frontend (Next.js)
 personChat Backend
    │
    ▼
-Playwright / Gemini Web
+Python Worker / Gemini Web
 ```
 
-Frontend 只负责 UI 和交互;Backend 是 Conversation / Message / Request 的权威数据源。
+Frontend 只负责 UI 和交互;Backend 是 Conversation / Message / Request 的权威数据源。生产公网的 `/backend-api/*` 由 Nginx 直接转发到 Backend,不经过 Next 运行时代理;Next 运行时代理只用于本地开发、直接访问前端端口和部署 loopback 健康检查。
 
 ## 与原 NextChat 的主要区别
 
@@ -81,11 +76,12 @@ app/
 ├─ admin/
 │  ├─ page.tsx              # /admin 管理控制台(ADMIN only)
 │  └─ login/page.tsx        # /admin/login 管理员登录
+├─ backend-api/[...path]/route.ts # 运行时后端代理(本地/直连前端端口)
 └─ api/
    ├─ config/route.ts       # 保留:非敏感 UI 配置
    └─ (其余 Provider / WebDAV 路由已统一 404)
 
-next.config.mjs             # /backend-api/* rewrite 规则
+next.config.mjs             # Next 配置(仅剩 google-fonts rewrite 等)
 ```
 
 - `backend-api.ts`:所有后端请求的唯一出口,只和同源 `/backend-api/*` 说话,无 CORS、无 Provider 鉴权头。
@@ -93,7 +89,8 @@ next.config.mjs             # /backend-api/* rewrite 规则
 - `chat.ts`:会话状态机(草稿 / 已加载 / 在途 Request / 归档),与 Backend 数据同步。
 - `auth.ts`:身份只由 `GET /backend-api/auth/session` 决定,本地不落任何凭证。
 - `admin/page.tsx`:Provider 状态 / 凭据检查 / Python Worker 重启,只在 ADMIN 面渲染。
-- `next.config.mjs`:`/backend-api/*` 同源代理。
+- `app/backend-api/[...path]/route.ts`:运行时后端代理,目标由 `BACKEND_ORIGIN` 指定;生产公网 `/backend-api/*` 由 Nginx 直连后端,不经过该路由。
+- `next.config.mjs`:仅保留 Next 配置(google-fonts rewrite 等),不再代理 `/backend-api/*`。
 
 > 原 NextChat 的多 Provider 客户端(`app/client/platforms/*`、`app/client/api.ts`)仍在仓库中,但已不参与聊天链路,仅为残留代码。
 
@@ -135,25 +132,41 @@ https://github.com/hukaiedu/NextChatBack
 
 没有 Backend 时,前端页面可以打开,但无法登录会话列表、无法聊天。
 
-## BACKEND_ORIGIN
+## BACKEND_ORIGIN(本地/直连运行时代理)
 
-Frontend 通过 Next.js Rewrite 将 `/backend-api/*` 代理到后端,目标地址由环境变量 `BACKEND_ORIGIN` 指定(`next.config.mjs` 在 dev server / build 启动时读取):
+生产公网路径由 Nginx 负责:
+
+```text
+Browser → Nginx (TLS)
+  /backend-api/* → personChat Backend /api/*
+  其他路径       → Next.js Frontend
+```
+
+Nginx 示例见 [`deploy/nginx/personchat.conf.example`](deploy/nginx/personchat.conf.example)。该路径要求后端设置 `AUTH_ALLOWED_ORIGINS`(公网 HTTPS Origin)和 `AUTH_TRUST_PROXY=true`,并由 Nginx 覆盖写入 `X-Real-IP`/`X-Forwarded-For`;详见[前端 CD 部署说明](deploy/frontend-cd.md)。
+
+Next 运行时路由 `app/backend-api/[...path]/route.ts` 仍保留,用于本地开发、直接访问前端端口和部署 loopback 健康检查;目标地址由服务端进程环境变量 `BACKEND_ORIGIN` 指定:
 
 ```bash
 BACKEND_ORIGIN=http://127.0.0.1:3010
 ```
 
-请求链路:
+运行时代理请求链路:
 
 ```text
-Browser 请求 /backend-api/*
+Browser(本地/直连前端端口)请求 /backend-api/*
 ↓
-Next.js Rewrite(beforeFiles)
+Next.js runtime proxy route
 ↓
 BACKEND_ORIGIN/api/*
 ```
 
-未设置 `BACKEND_ORIGIN` 时默认为 `http://127.0.0.1:3010`。该变量只在启动时读取一次,修改后需重启 dev server / 重新构建。
+未设置 `BACKEND_ORIGIN` 时默认为 `http://127.0.0.1:3010`。修改 systemd 环境文件后需重启前端进程,无需重新构建。该变量不参与生产 Nginx 直连路径。
+
+## main 自动发布
+
+前端合并到 `main` 后,全部 CI 检查通过才部署到 Ubuntu 22.04 / x86_64,由 systemd 托管。构建产物携带独立 Node 24,不修改后端使用的系统 Node;新版健康检查失败自动回滚。
+
+服务器首次准备、GitHub production Secrets/Variables 和验收步骤见 [前端 CD 部署说明](deploy/frontend-cd.md)。先完成配置再合并发布分支。
 
 ## 环境 profile
 
